@@ -6,6 +6,8 @@ import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.attribute.EntityAttributes;
+import net.minecraft.enchantment.EnchantmentHelper;
+import net.minecraft.enchantment.Enchantments;
 import net.minecraft.item.Items;
 import net.minecraft.item.CrossbowItem;
 import net.minecraft.block.Blocks;
@@ -52,6 +54,7 @@ final class TrainingController {
     private static final float RETREAT_END_HEALTH = 14.0F;
     /** Zielpunkt des Rueckzugs liegt so viele Blöcke hinter dem Bot. */
     private static final double RETREAT_FLEE_DISTANCE = 12.0;
+    private static final double RETREAT_SAFE_DISTANCE = 7.0;
     private static final double EAT_SAFE_DISTANCE = 3.5;
     private static final long SHIELD_RETRIGGER_COOLDOWN_TICKS = 40;
     private static final long SHIELD_MAX_HOLD_TICKS = 40;
@@ -63,6 +66,9 @@ final class TrainingController {
     private static final double RANGED_MAX_DISTANCE = 28.0;
     private static final double RANGED_STOP_DISTANCE = 5.0;
     private static final long WIND_CHARGE_COOLDOWN_TICKS = 40;
+    private static final long XP_BOTTLE_COOLDOWN_TICKS = 20;
+    private static final long MOVEMENT_PROGRESS_INTERVAL_TICKS = 10;
+    private static final long OBSTACLE_ESCAPE_TICKS = 12;
     private static final long SPLASH_BUFF_COOLDOWN_TICKS = 100;
     /** Splash-Potion of Damage: nur aus der Naehe auf den Gegner werfen, mit eigenem Cooldown. */
     private static final long SPLASH_DAMAGE_COOLDOWN_TICKS = 80;
@@ -334,6 +340,27 @@ final class TrainingController {
 
         optimizeArmor(session, bot);
         double distance = bot.distanceTo(target);
+        // Retreat ends only after health has recovered. Reaching a safe distance pauses movement,
+        // so the bot can heal instead of immediately running back into the opponent.
+        if (bot.getHealth() <= RETREAT_HEALTH_THRESHOLD) {
+            if (!session.retreating) {
+                session.retreating = true;
+                TrainingLog.event("RETREAT_START bot=" + session.botName + " health="
+                        + String.format(Locale.ROOT, "%.1f", bot.getHealth()));
+            }
+        } else if (session.retreating && bot.getHealth() >= RETREAT_END_HEALTH) {
+            session.retreating = false;
+            TrainingLog.event("RETREAT_END bot=" + session.botName + " health="
+                    + String.format(Locale.ROOT, "%.1f", bot.getHealth())
+                    + " distance=" + String.format(Locale.ROOT, "%.2f", distance));
+        }
+
+        if (!session.retreating && !session.healing && !enemyPressure(bot, target)
+                && bot.getHealth() >= RETREAT_END_HEALTH
+                && tryMendingExperienceBottle(server, session, bot, target)) {
+            recordHealingTick(session, bot, target, state, reward);
+            return;
+        }
         // Fernkampf: solange Ziel zu weit für die Nahkampfwaffe ist, werden Bogen/Armbrust
         // gehalten und geschossen (Wiki: use continuous = jeden Tick halten).
         boolean rangedActive = tryRangedCombat(server, session, bot, target, distance);
@@ -353,19 +380,6 @@ final class TrainingController {
 
         QLearningPolicy.Action action = session.policy.choose(state);
         boolean targetBlocking = isBlocking(target);
-        if (bot.getHealth() <= RETREAT_HEALTH_THRESHOLD) {
-            if (!session.retreating) {
-                session.retreating = true;
-                TrainingLog.event("RETREAT_START bot=" + session.botName + " health="
-                        + String.format(Locale.ROOT, "%.1f", bot.getHealth()));
-            }
-        } else if (session.retreating
-                && (bot.getHealth() >= RETREAT_END_HEALTH || distance >= 8.0)) {
-            session.retreating = false;
-            TrainingLog.event("RETREAT_END bot=" + session.botName + " health="
-                    + String.format(Locale.ROOT, "%.1f", bot.getHealth())
-                    + " distance=" + String.format(Locale.ROOT, "%.2f", distance));
-        }
         if (session.retreating) {
             action = QLearningPolicy.Action.RETREAT;
         } else if (!bot.canSee(target) && distance <= 6.0) {
@@ -399,9 +413,13 @@ final class TrainingController {
             tryCrystalBlast(server, session, bot, target);
         }
         boolean crystalBusy = session.crystalPhase != CrystalPhase.IDLE;
-        boolean nativePathing = updatePathing(server, session, bot, target,
+        boolean nativePathing = updatePathing(server, session, bot, target, action,
                 !rangedActive && !session.retreating && !session.healing && !crystalBusy
                         && session.macePhase == MacePhase.DONE);
+        if (!nativePathing && session.obstacleEscapeUntilTick >= session.tick) {
+            action = session.obstacleEscapeLeft
+                    ? QLearningPolicy.Action.STRAFE_LEFT : QLearningPolicy.Action.STRAFE_RIGHT;
+        }
         if (crystalBusy) {
             // Phase actions need to keep their selected slot and view until HeroBot handles use once.
             HeroBotAdapter.stopMovement(server, session.botName);
@@ -427,45 +445,91 @@ final class TrainingController {
         }
     }
 
-    /** Uses HeroBot's own path command only for obstructed pursuit; otherwise normal movement remains active. */
+    /** Uses HeroBot pathfinding for obstructed pursuit and detects direct movement stuck at walls. */
     private static boolean updatePathing(MinecraftServer server, Session session,
-                                         ServerPlayerEntity bot, ServerPlayerEntity target, boolean allowed) {
-        boolean needsPath = allowed && session.nativePathSupported && !bot.canSee(target)
-                && bot.distanceTo(target) > 3.5;
-        if (!needsPath) {
-            if (session.pathing) HeroBotAdapter.stopPathing(server, session.botName);
-            session.pathing = false;
-            session.stuckChecks = 0;
-            session.lastPathProgressPosition = null;
+                                         ServerPlayerEntity bot, ServerPlayerEntity target,
+                                         QLearningPolicy.Action action, boolean allowed) {
+        boolean advancing = action == QLearningPolicy.Action.APPROACH
+                || action == QLearningPolicy.Action.STRAFE_LEFT
+                || action == QLearningPolicy.Action.STRAFE_RIGHT;
+        boolean monitorMovement = allowed && advancing && bot.distanceTo(target) > 3.5;
+        if (!monitorMovement) {
+            resetMovementTracking(server, session);
             return false;
         }
-        if (!session.pathing) {
-            HeroBotAdapter.pathToEntity(server, session.botName, session.targetName);
-            session.pathing = true;
-            session.lastPathCommandTick = session.tick;
-            session.lastPathProgressPosition = new Vec3d(bot.getX(), bot.getY(), bot.getZ());
-            session.stuckChecks = 0;
-            TrainingLog.event("PATH_START bot=" + session.botName + " target=" + session.targetName);
-            return true;
-        }
-        if (session.tick - session.lastPathCommandTick >= 10) {
-            if (session.lastPathProgressPosition != null
-                    && new Vec3d(bot.getX(), bot.getY(), bot.getZ())
-                    .squaredDistanceTo(session.lastPathProgressPosition) < 0.09) {
+
+        if (session.tick - session.lastMovementCheckTick >= MOVEMENT_PROGRESS_INTERVAL_TICKS) {
+            Vec3d position = new Vec3d(bot.getX(), bot.getY(), bot.getZ());
+            if (session.lastMovementCheckPosition != null
+                    && position.squaredDistanceTo(session.lastMovementCheckPosition) < 0.09) {
                 session.stuckChecks++;
             } else {
                 session.stuckChecks = 0;
+                session.pathRetries = 0;
             }
-            session.lastPathProgressPosition = new Vec3d(bot.getX(), bot.getY(), bot.getZ());
+            session.lastMovementCheckPosition = position;
+            session.lastMovementCheckTick = session.tick;
+        }
+
+        boolean blocked = !bot.canSee(target);
+        boolean needsPath = session.nativePathSupported && (blocked || session.stuckChecks >= 2);
+        if (session.pathing && !needsPath) {
+            HeroBotAdapter.stopPathing(server, session.botName);
+            session.pathing = false;
+            session.stuckChecks = 0;
+        }
+        if (needsPath && !session.pathing) {
+            HeroBotAdapter.pathToEntity(server, session.botName, session.targetName);
+            session.pathing = true;
+            session.lastPathCommandTick = session.tick;
+            TrainingLog.event("PATH_START bot=" + session.botName + " target=" + session.targetName
+                    + " reason=" + (blocked ? "occluded" : "stuck"));
+            return true;
+        }
+
+        if (session.pathing) {
             if (session.stuckChecks >= 2 && session.tick - session.lastPathCommandTick >= 20) {
+                session.pathRetries++;
+                if (session.pathRetries >= 3) {
+                    HeroBotAdapter.stopPathing(server, session.botName);
+                    session.pathing = false;
+                    session.obstacleEscapeUntilTick = session.tick + OBSTACLE_ESCAPE_TICKS;
+                    session.obstacleEscapeLeft = (session.pathRetries % 2) == 1;
+                    session.stuckChecks = 0;
+                    TrainingLog.event("PATH_FALLBACK bot=" + session.botName
+                            + " target=" + session.targetName + " retries=" + session.pathRetries);
+                    if (bot.isOnGround()) HeroBotAdapter.jump(server, session.botName);
+                    return false;
+                }
                 HeroBotAdapter.stopPathing(server, session.botName);
                 HeroBotAdapter.pathToEntity(server, session.botName, session.targetName);
                 session.lastPathCommandTick = session.tick;
                 session.stuckChecks = 0;
                 TrainingLog.event("PATH_RETRY bot=" + session.botName + " target=" + session.targetName);
             }
+            return true;
         }
-        return true;
+
+        if (!session.nativePathSupported && session.stuckChecks >= 2) {
+            session.obstacleEscapeUntilTick = session.tick + OBSTACLE_ESCAPE_TICKS;
+            session.obstacleEscapeLeft = (session.pathRetries++ % 2) == 0;
+            session.stuckChecks = 0;
+            TrainingLog.event("OBSTACLE_ESCAPE bot=" + session.botName
+                    + " target=" + session.targetName
+                    + " direction=" + (session.obstacleEscapeLeft ? "left" : "right"));
+            if (bot.isOnGround()) HeroBotAdapter.jump(server, session.botName);
+        }
+        return false;
+    }
+
+    private static void resetMovementTracking(MinecraftServer server, Session session) {
+        if (session.pathing) HeroBotAdapter.stopPathing(server, session.botName);
+        session.pathing = false;
+        session.stuckChecks = 0;
+        session.pathRetries = 0;
+        session.lastMovementCheckPosition = null;
+        session.lastMovementCheckTick = session.tick;
+        session.obstacleEscapeUntilTick = Long.MIN_VALUE / 2;
     }
 
     static void afterDeath(LivingEntity entity) {
@@ -650,6 +714,11 @@ final class TrainingController {
                 sprintIfAllowed(server, session, bot);
             }
             case RETREAT -> {
+                if (botEntity.distanceTo(targetEntity) >= RETREAT_SAFE_DISTANCE) {
+                    HeroBotAdapter.stopMovement(server, bot);
+                    execute(server, "player " + bot + " unsprint");
+                    return;
+                }
                 Vec3d away = new Vec3d(botEntity.getX() - targetEntity.getX(), 0.0,
                         botEntity.getZ() - targetEntity.getZ());
                 if (away.lengthSquared() < 1.0E-4) {
@@ -1111,9 +1180,15 @@ final class TrainingController {
                                            ServerPlayerEntity bot, ServerPlayerEntity target,
                                            double distance) {
         if (session.rangedActive) {
+            if (session.kit == PvPKit.CRYSTAL || session.retreating
+                    || bot.getHealth() <= RETREAT_HEALTH_THRESHOLD) {
+                cancelRangedCombat(server, session, "crystal_or_retreat");
+                return false;
+            }
             return true;
         }
-        if (distance < RANGED_MIN_DISTANCE || distance > RANGED_MAX_DISTANCE || !bot.canSee(target)
+        if (session.kit == PvPKit.CRYSTAL || bot.getHealth() <= RETREAT_HEALTH_THRESHOLD
+                || distance < RANGED_MIN_DISTANCE || distance > RANGED_MAX_DISTANCE || !bot.canSee(target)
                 || session.retreating) {
             return false;
         }
@@ -1159,7 +1234,8 @@ final class TrainingController {
             return;
         }
         double distance = bot.distanceTo(target);
-        if (distance <= RANGED_STOP_DISTANCE || distance > RANGED_MAX_DISTANCE || !bot.canSee(target)
+        if (bot.getHealth() <= RETREAT_HEALTH_THRESHOLD || distance <= RANGED_STOP_DISTANCE
+                || distance > RANGED_MAX_DISTANCE || !bot.canSee(target)
                 || session.retreating
                 || session.rangedSlot < 0 || bot.getInventory().getSelectedSlot() != session.rangedSlot) {
             stopRangedCombat(server, session, distance);
@@ -1310,6 +1386,46 @@ final class TrainingController {
         session.lastWindChargeTick = session.tick;
         TrainingLog.event("WIND_CHARGE bot=" + session.botName
                 + " offhand=" + itemPath(bot.getEquippedStack(net.minecraft.entity.EquipmentSlot.OFFHAND)));
+    }
+
+    /** Uses XP bottles only when a damaged, equipped Mending item can receive the XP orbs. */
+    private static boolean tryMendingExperienceBottle(MinecraftServer server, Session session,
+                                                       ServerPlayerEntity bot, ServerPlayerEntity target) {
+        if (session.itemLease != null || session.tick - session.lastExperienceBottleTick < XP_BOTTLE_COOLDOWN_TICKS
+                || bot.distanceTo(target) < 10.0 || !bot.isOnGround()) {
+            return false;
+        }
+
+        var mending = bot.getEntityWorld().getRegistryManager()
+                .getOptionalEntry(Enchantments.MENDING).orElse(null);
+        if (mending == null) return false;
+
+        EquipmentSlot[] equippedSlots = {EquipmentSlot.MAINHAND, EquipmentSlot.OFFHAND,
+                EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET};
+        int damagedMendingItems = 0;
+        for (EquipmentSlot slot : equippedSlots) {
+            ItemStack stack = bot.getEquippedStack(slot);
+            if (!stack.isEmpty() && stack.getDamage() > 0
+                    && EnchantmentHelper.getLevel(mending, stack) > 0) {
+                damagedMendingItems++;
+            }
+        }
+        if (damagedMendingItems == 0) return false;
+
+        int bottleSlot = findInventorySlot(bot, stack -> stack.isOf(Items.EXPERIENCE_BOTTLE));
+        if (bottleSlot < 0) return false;
+
+        HeroBotAdapter.stopMovement(server, session.botName);
+        HeroBotAdapter.setSprint(server, session.botName, false);
+        HeroBotAdapter.lookAtPositionNow(server, session.botName,
+                new Vec3d(bot.getX() + 0.2, bot.getY() - 0.25, bot.getZ() + 0.2));
+        if (!useItemOnceFromSlot(server, session, bot, bottleSlot)) return false;
+
+        session.lastExperienceBottleTick = session.tick;
+        TrainingLog.event("XP_MEND_THROW bot=" + session.botName
+                + " damaged_mending_items=" + damagedMendingItems
+                + " distance=" + String.format(Locale.ROOT, "%.2f", bot.distanceTo(target)));
+        return true;
     }
 
     /** Ersten Hotbar-Slot mit dem gesuchten Item suchen, sonst -1. */
@@ -1508,7 +1624,8 @@ final class TrainingController {
 
     private static void tryPearl(MinecraftServer server, Session session,
                                  ServerPlayerEntity bot, ServerPlayerEntity target) {
-        if (bot.distanceTo(target) < PEARL_DISTANCE
+        if (session.retreating || bot.getHealth() <= RETREAT_HEALTH_THRESHOLD || !bot.canSee(target)
+                || bot.distanceTo(target) < PEARL_DISTANCE
                 || session.tick - session.lastPearlTick < PEARL_COOLDOWN_TICKS) {
             return;
         }
@@ -2270,12 +2387,17 @@ final class TrainingController {
         private long itemLeaseRestoreTick = NO_PENDING_CRIT;
         private boolean pathing;
         private final boolean nativePathSupported;
-        private Vec3d lastPathProgressPosition;
+        private Vec3d lastMovementCheckPosition;
         private int stuckChecks;
+        private int pathRetries;
+        private long lastMovementCheckTick;
+        private long obstacleEscapeUntilTick = Long.MIN_VALUE / 2;
+        private boolean obstacleEscapeLeft;
         private long lastPathCommandTick = Long.MIN_VALUE / 2;
         private long tick;
         private long decisions;
         private long lastPearlTick = -PEARL_COOLDOWN_TICKS;
+        private long lastExperienceBottleTick = -XP_BOTTLE_COOLDOWN_TICKS;
         private long lastHealTick = -HEAL_COOLDOWN_TICKS;
         private long lastEatTick = -EAT_COOLDOWN_TICKS;
         private boolean retreating;

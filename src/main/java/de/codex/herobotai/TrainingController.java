@@ -283,9 +283,8 @@ final class TrainingController {
             if (session.previousState != null) {
                 session.policy.update(session.previousState, session.previousAction, reward, null, true);
             }
-            if (targetDown && !botDown) {
-                learnFromHuman(session, bot, target, botDamage + HUMAN_WIN_REWARD, true);
-            }
+            learnFromHuman(session, bot, target,
+                    botDamage + (botDown && !targetDown ? HUMAN_WIN_REWARD : 0.0), true);
             TrainingLog.record(session.tick, session.botName, session.targetName, state,
                     session.previousAction == null ? QLearningPolicy.Action.HOLD : session.previousAction,
                     reward, true);
@@ -428,9 +427,8 @@ final class TrainingController {
         if (session.previousState != null && session.previousAction != null) {
             session.policy.update(session.previousState, session.previousAction, reward, null, true);
         }
-        if (targetDown && !botDown && bot != null && target != null) {
-            learnFromHuman(session, bot, target, botDamage + HUMAN_WIN_REWARD, true);
-        }
+        learnFromHuman(session, bot, target,
+                botDamage + (botDown && !targetDown ? HUMAN_WIN_REWARD : 0.0), true);
         TrainingLog.record(session.tick, session.botName, session.targetName, state,
                 session.previousAction == null ? QLearningPolicy.Action.HOLD : session.previousAction,
                 reward, true);
@@ -596,7 +594,7 @@ final class TrainingController {
         EquipmentSlot[] armorSlots = {EquipmentSlot.HEAD, EquipmentSlot.CHEST,
                 EquipmentSlot.LEGS, EquipmentSlot.FEET};
         for (EquipmentSlot armorSlot : armorSlots) {
-            if (armorSlot == EquipmentSlot.CHEST && session.macePhase != MacePhase.DONE
+            if (armorSlot == EquipmentSlot.CHEST && session.maceLoadout
                     && bot.getEquippedStack(EquipmentSlot.CHEST).isOf(Items.ELYTRA)) {
                 continue;
             }
@@ -974,7 +972,7 @@ final class TrainingController {
         session.lastBotHealth = bot.getHealth();
         session.lastTargetHealth = target.getHealth();
         HeroBotAdapter.setAutoJump(session.server, session.botName, true);
-        HeroBotAdapter.setAttacking(session.server, session.botName, true);
+        HeroBotAdapter.setAttacking(session.server, session.botName, false);
         TrainingLog.event("MACE_END bot=" + session.botName + " target=" + session.targetName
                 + " result=" + reason + " damage=" + String.format(Locale.ROOT, "%.1f", targetDamage)
                 + " self_damage=" + String.format(Locale.ROOT, "%.1f", botDamage));
@@ -1073,6 +1071,9 @@ final class TrainingController {
      * den Effekt noch nicht hat. Der Potions-Typ wird über die Komponente gelesen.
      */
     private static void trySplashBuff(MinecraftServer server, Session session, ServerPlayerEntity bot) {
+        if (session.pendingSplashRestore) {
+            return;
+        }
         if (session.tick - session.lastSplashBuffTick < SPLASH_BUFF_COOLDOWN_TICKS) {
             return;
         }
@@ -1117,6 +1118,9 @@ final class TrainingController {
      */
     private static void trySplashDamage(MinecraftServer server, Session session,
                                         ServerPlayerEntity bot, ServerPlayerEntity target) {
+        if (session.pendingSplashRestore) {
+            return;
+        }
         if (session.tick - session.lastSplashDamageTick < SPLASH_DAMAGE_COOLDOWN_TICKS) {
             return;
         }
@@ -1241,7 +1245,7 @@ final class TrainingController {
         session.crystalNextTick = session.tick + 1;
 
         // Obsidian-Basis vorhanden? End-Crystals brauchen Obsidian oder Bedrock.
-        if (isObsidianAt(bot, ground)) {
+        if (isCrystalBaseAt(bot, ground)) {
             session.crystalPhase = CrystalPhase.OBIS_PLACED;
         } else {
             int obiSlot = findHotbarSlot(bot, Items.OBSIDIAN);
@@ -1258,10 +1262,10 @@ final class TrainingController {
         }
     }
 
-    private static boolean isObsidianAt(ServerPlayerEntity bot, Vec3d pos) {
-        return bot.getEntityWorld().getBlockState(new BlockPos(
-                (int) Math.floor(pos.x), (int) Math.floor(pos.y), (int) Math.floor(pos.z)))
-                .isOf(Blocks.OBSIDIAN);
+    private static boolean isCrystalBaseAt(ServerPlayerEntity bot, Vec3d pos) {
+        var state = bot.getEntityWorld().getBlockState(new BlockPos(
+                (int) Math.floor(pos.x), (int) Math.floor(pos.y), (int) Math.floor(pos.z)));
+        return state.isOf(Blocks.OBSIDIAN) || state.isOf(Blocks.BEDROCK);
     }
 
     /**
@@ -1281,7 +1285,7 @@ final class TrainingController {
 
         switch (session.crystalPhase) {
             case OBIS_PLACED -> {
-                if (!isObsidianAt(bot, ground)) {
+                if (!isCrystalBaseAt(bot, ground)) {
                     // Wurf hat nicht gegriffen (Winkel, Abstand oder Kollision) — abbrechen.
                     TrainingLog.event("CRYSTAL_OBI_FAIL bot=" + session.botName);
                     restoreCrystalSlot(server, session, bot);
@@ -1400,10 +1404,9 @@ final class TrainingController {
             session.pendingCritAttackTick = session.tick + CRIT_FALL_DELAY_TICKS;
             return;
         }
-        // Schild-Stunning: kurzer Einmal-Angriff auf den blockenden Gegner. HeroBot hat
-        // kein "twice" (nur once|continuous|interval), deshalb hier attackOnce.
+        // HeroBot attack twice disables the shield with the first hit and follows up immediately.
         if (isBlocking(target)) {
-            HeroBotAdapter.attackOnce(server, session.botName);
+            HeroBotAdapter.attackTwice(server, session.botName);
             session.lastManualAttackTick = session.tick;
             TrainingLog.event("SHIELD_STUN bot=" + session.botName + " target=" + session.targetName
                     + " distance=" + String.format(Locale.ROOT, "%.2f", distance)
@@ -1583,8 +1586,11 @@ final class TrainingController {
                                        double humanReward, boolean terminal) {
         String nextState = terminal ? null : humanState(session, bot, target);
         double clampedReward = Math.max(0.0, humanReward);
-        if (session.humanPreviousState != null && session.humanPreviousAction != null) {
-            session.policy.update(session.humanPreviousState, session.humanPreviousAction,
+        QLearningPolicy.Action intervalAction = bot == null || target == null
+                ? QLearningPolicy.Action.HOLD
+                : inferHumanAction(bot, target, session.humanLastPos);
+        if (session.humanPreviousState != null) {
+            session.policy.update(session.humanPreviousState, intervalAction,
                     clampedReward, nextState, terminal);
             if (clampedReward >= 1.0 || terminal) {
                 TrainingLog.event("HUMAN_LEARN target=" + session.targetName
@@ -1596,7 +1602,6 @@ final class TrainingController {
             return;
         }
         session.humanPreviousState = nextState;
-        session.humanPreviousAction = inferHumanAction(bot, target, session.humanLastPos);
         session.humanLastPos = target.getEntityPos();
     }
 
@@ -1790,7 +1795,6 @@ final class TrainingController {
         private String previousState;
         private QLearningPolicy.Action previousAction;
         private String humanPreviousState;
-        private QLearningPolicy.Action humanPreviousAction;
         private Vec3d humanLastPos;
         private float lastBotHealth;
         private float lastTargetHealth;

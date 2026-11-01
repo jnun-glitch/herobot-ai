@@ -3,7 +3,7 @@
   "id": "herobot_ai_training",
   "version": "${version}",
   "name": "HeroBot AI Training",
-  "description": "PvP-Trainingsbot mit Arena-Zielsuche, HeroBot-Kampfsteuerung, Q-Learning und ModMenu-Feedback.",
+  "description": "Direktes PvP-Training mit HeroBot-Kampfsteuerung, Q-Learning und ModMenu-Feedback.",
   "environment": "*",
   "license": "MIT",
   "authors": [

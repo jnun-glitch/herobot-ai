@@ -105,6 +105,10 @@ final class HeroBotAdapter {
         run(server, "player " + bot + " attack once");
     }
 
+    static void attackTwice(MinecraftServer server, String bot) {
+        run(server, "player " + bot + " attack twice");
+    }
+
     /** Setzt den Item-Cooldown (z. B. ender_pearl), ohne das Item zu benutzen. */
     static void resetItemCooldown(MinecraftServer server, String bot, String itemId) {
         run(server, "player " + bot + " itemCd " + itemId + " reset");
@@ -116,11 +120,7 @@ final class HeroBotAdapter {
         run(server, "herobot noProjectileRandom true");
     }
 
-    /**
-     * Nutzen im Slot. HeroBots Action-Kommandos kennen ausschliesslich once|continuous|interval
-     * (belegt: "attack"/"use" laufen ueber dieselbe makeActionCommand-Factory, Literale in
-     * PlayerCommand.class). Das fruehere "twice" war ein Syntaxfehler und hat nie geliefert.
-     */
+    /** Nutzt den Gegenstand im gewaehlten Slot einmal. */
     static void useOnce(MinecraftServer server, String bot) {
         run(server, "player " + bot + " use once");
     }

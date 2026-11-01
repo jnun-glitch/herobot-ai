@@ -1,5 +1,6 @@
 package de.codex.herobotai;
 
+import net.minecraft.client.MinecraftClient;
 import net.fabricmc.loader.api.FabricLoader;
 
 import java.io.IOException;
@@ -107,7 +108,11 @@ public final class TrainingStore {
         report.append("\n--- Debug-Log (lokal erzeugte Einträge) ---\n");
         report.append(DiagnosticsLog.readLog());
         report.append("\n--- PvP-Kampfdaten (letzte 100 Zeilen) ---\n");
-        report.append(TrainingLog.readRecent());
+        if (MinecraftClient.getInstance().getServer() == null) {
+            report.append("(Auf Remote- und dedizierten Servern sind die serverseitigen Kampfdaten hier nicht abrufbar.)\n");
+        } else {
+            report.append(TrainingLog.readRecent());
+        }
         return report.toString();
     }
 

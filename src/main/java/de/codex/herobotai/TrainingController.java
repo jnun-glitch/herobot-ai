@@ -5,11 +5,14 @@ import net.minecraft.server.command.ServerCommandSource;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.EquipmentSlot;
+import net.minecraft.entity.attribute.EntityAttributes;
 import net.minecraft.item.Items;
+import net.minecraft.item.CrossbowItem;
 import net.minecraft.block.Blocks;
 import net.minecraft.item.ItemStack;
 import net.minecraft.registry.Registries;
 import net.minecraft.text.Text;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
@@ -24,6 +27,8 @@ final class TrainingController {
     private static final long MANUAL_ATTACK_INTERVAL_TICKS = 9;
     /** Nach jedem Treffer Sprint 2 Ticks loslassen -> jeder Hit wird Sprint-KB-Angriff (W-Tap). */
     private static final long W_TAP_RELEASE_TICKS = 2;
+    /** Voller Bogen-Zug ohne Quick Charge: 20 Ticks. */
+    private static final long BOW_DRAW_TICKS = 20;
     /**
      * Ticks zwischen Sprung und Beginn der fallenden Phase. Belegt: getJumpVelocity()
      * liefert fuer Spieler 0.42, die Schwerkraft zieht pro Tick 0.08 ab
@@ -248,6 +253,8 @@ final class TrainingController {
         // Crit-Nachschlag laeuft ebenfalls jeden Tick: die fallende Phase des Sprungs
         // dauert nur ~6 Ticks, das 5-Tick-Intervall waere sonst nie getroffen.
         tickCritAttack(server, session, bot, target);
+        tickSprintReset(server, session);
+        tickRangedCombat(server, session, bot, target);
         if (session.tick % DECISION_INTERVAL_TICKS != 0) {
             return;
         }
@@ -378,19 +385,30 @@ final class TrainingController {
                     ? QLearningPolicy.Action.APPROACH
                     : QLearningPolicy.Action.HOLD;
         }
-        tryPearl(server, session, bot, target);
-        if (action == QLearningPolicy.Action.RETREAT) {
+        if (!rangedActive && session.crystalPhase == CrystalPhase.IDLE) {
+            tryPearl(server, session, bot, target);
+        }
+        if (action == QLearningPolicy.Action.RETREAT && !rangedActive
+                && session.crystalPhase == CrystalPhase.IDLE) {
             tryWindCharge(server, session, bot);
         }
         if (!rangedActive) {
             tryCrystalBlast(server, session, bot, target);
         }
-        applyAction(server, session, bot, target, action);
-        if (action == QLearningPolicy.Action.STRAFE_LEFT || action == QLearningPolicy.Action.STRAFE_RIGHT) {
-            lookAtCombatTarget(server, session, target);
+        boolean crystalBusy = session.crystalPhase != CrystalPhase.IDLE;
+        if (crystalBusy) {
+            // Phase actions need to keep their selected slot and view until HeroBot handles use once.
+            HeroBotAdapter.stopMovement(server, session.botName);
+            HeroBotAdapter.setSprint(server, session.botName, false);
+            action = QLearningPolicy.Action.HOLD;
+        } else {
+            applyAction(server, session, bot, target, action);
+            if (action == QLearningPolicy.Action.STRAFE_LEFT || action == QLearningPolicy.Action.STRAFE_RIGHT) {
+                lookAtCombatTarget(server, session, target);
+            }
         }
-        if (!rangedActive) {
-            tryCritMelee(server, session, bot, target, distance);
+        if (!rangedActive && !crystalBusy) {
+            tryCritMelee(server, session, bot, target, distance, action);
         }
         TrainingLog.record(session.tick, session.botName, session.targetName, state, action, reward, false);
 
@@ -528,14 +546,33 @@ final class TrainingController {
         return 1;
     }
 
+    /** Sprint-Reset erst nach dem tick ausfuehren, in dem HeroBot den Schlag verarbeitet hat. */
+    private static void tickSprintReset(MinecraftServer server, Session session) {
+        if (session.pendingSprintReleaseTick != NO_PENDING_CRIT
+                && session.tick >= session.pendingSprintReleaseTick) {
+            HeroBotAdapter.setSprint(server, session.botName, false);
+            session.pendingSprintReleaseTick = NO_PENDING_CRIT;
+            session.wTapNeedsRestart = true;
+        }
+        if (!session.wTapNeedsRestart || session.tick < session.wTapUntilTick
+                || session.rangedActive || session.retreating || session.healing
+                || session.pendingCritAttackTick != NO_PENDING_CRIT
+                || session.crystalPhase != CrystalPhase.IDLE
+                || session.macePhase != MacePhase.DONE) {
+            return;
+        }
+        HeroBotAdapter.setSprint(server, session.botName, true);
+        session.wTapNeedsRestart = false;
+    }
+
     /**
-     * W-Tap: innerhalb des Freigabe-Fensters (wTapUntilTick) keinen Sprint erzwingen,
-     * sonst wird setSprint(false) nach dem Treffer sofort ueberschrieben und der naechste
-     * Treffer ist wieder ein Sprint-Schlag ohne Knockback-Bonus.
+     * W-Tap: Sprint bleibt bis zum ausgefuehrten Treffer an. Danach bleibt der Bot kurz
+     * unsprintend; nur Vorwaertsbewegung startet Sprint wieder.
      */
     private static void sprintIfAllowed(MinecraftServer server, Session session, String bot) {
         if (session.tick > session.wTapUntilTick) {
             execute(server, "player " + bot + " sprint");
+            session.wTapNeedsRestart = false;
         }
     }
 
@@ -585,7 +622,9 @@ final class TrainingController {
             }
             case HOLD -> {
                 execute(server, "player " + bot + " unsprint");
-                execute(server, "player " + bot + (session.tick % 2 == 0 ? " move left" : " move right"));
+                if (!session.rangedActive) {
+                    execute(server, "player " + bot + (session.tick % 2 == 0 ? " move left" : " move right"));
+                }
             }
         }
     }
@@ -982,44 +1021,190 @@ final class TrainingController {
     private static boolean tryRangedCombat(MinecraftServer server, Session session,
                                            ServerPlayerEntity bot, ServerPlayerEntity target,
                                            double distance) {
-        if (!session.rangedActive) {
-            if (distance < RANGED_MIN_DISTANCE || distance > RANGED_MAX_DISTANCE) {
-                return false;
-            }
-            // Armbrust zuerst: in den Kits bereits geladen, feuert sofort.
-            int slot = findHotbarSlot(bot, Items.CROSSBOW);
-            if (slot < 0) {
-                int bowSlot = findHotbarSlot(bot, Items.BOW);
-                if (bowSlot >= 0 && hasArrows(bot)) {
-                    slot = bowSlot;
-                }
-            }
-            if (slot < 0) {
-                return false;
-            }
-            if (bot.getInventory().getSelectedSlot() != slot) {
-                HeroBotAdapter.selectHotbar(server, session.botName, slot);
-            }
-            HeroBotAdapter.setUsing(server, session.botName, true);
-            session.rangedActive = true;
-            TrainingLog.event("RANGE_DRAW bot=" + session.botName
-                    + " item=" + itemPath(bot.getInventory().getStack(slot))
-                    + " slot=" + slot
-                    + " distance=" + String.format(Locale.ROOT, "%.2f", distance));
+        if (session.rangedActive) {
+            return true;
+        }
+        if (distance < RANGED_MIN_DISTANCE || distance > RANGED_MAX_DISTANCE || !bot.canSee(target)
+                || session.retreating) {
+            return false;
+        }
+
+        int slot = findChargedCrossbowSlot(bot);
+        if (slot >= 0) {
+            startCrossbowShot(server, session, bot, slot, distance);
             return true;
         }
 
-        ItemStack held = bot.getInventory().getStack(bot.getInventory().getSelectedSlot());
-        boolean holdsRanged = held.isOf(Items.BOW) || held.isOf(Items.CROSSBOW);
-        if (distance <= RANGED_STOP_DISTANCE || !holdsRanged) {
-            // Wiki: use ohne Parameter stoppt das Halten (Bogen wird losgelassen, feuert ab).
-            HeroBotAdapter.setUsing(server, session.botName, false);
-            session.rangedActive = false;
-            TrainingLog.event("RANGE_STOP bot=" + session.botName
-                    + " distance=" + String.format(Locale.ROOT, "%.2f", distance));
-            return false;
+        int bowSlot = findHotbarSlot(bot, Items.BOW);
+        if (bowSlot >= 0 && hasArrows(bot)) {
+            if (bot.getInventory().getSelectedSlot() != bowSlot) {
+                HeroBotAdapter.selectHotbar(server, session.botName, bowSlot);
+            }
+            session.rangedSlot = bowSlot;
+            session.rangedActive = true;
+            session.rangedPhase = RangedPhase.BOW_DRAWING;
+            session.rangedNextTick = session.tick + BOW_DRAW_TICKS;
+            HeroBotAdapter.setUsing(server, session.botName, true);
+            logRangedStart(session, bot, bowSlot, distance, "BOW_DRAW");
+            return true;
         }
-        return true;
+
+        int crossbowSlot = findHotbarSlot(bot, Items.CROSSBOW);
+        if (crossbowSlot >= 0 && hasCrossbowProjectiles(bot)) {
+            if (bot.getInventory().getSelectedSlot() != crossbowSlot) {
+                HeroBotAdapter.selectHotbar(server, session.botName, crossbowSlot);
+            }
+            session.rangedSlot = crossbowSlot;
+            session.rangedActive = true;
+            session.rangedPhase = RangedPhase.CROSSBOW_LOADING;
+            HeroBotAdapter.setUsing(server, session.botName, true);
+            logRangedStart(session, bot, crossbowSlot, distance, "CROSSBOW_LOAD");
+            return true;
+        }
+        return false;
+    }
+
+    /** Fuehrt Bogen- und Armbrust-Zyklen pro tick aus: laden, freigeben, schiessen, nachladen. */
+    private static void tickRangedCombat(MinecraftServer server, Session session,
+                                         ServerPlayerEntity bot, ServerPlayerEntity target) {
+        if (!session.rangedActive) {
+            return;
+        }
+        double distance = bot.distanceTo(target);
+        if (distance <= RANGED_STOP_DISTANCE || distance > RANGED_MAX_DISTANCE || !bot.canSee(target)
+                || session.retreating
+                || session.rangedSlot < 0 || bot.getInventory().getSelectedSlot() != session.rangedSlot) {
+            stopRangedCombat(server, session, distance);
+            return;
+        }
+
+        ItemStack held = bot.getInventory().getStack(session.rangedSlot);
+        switch (session.rangedPhase) {
+            case BOW_DRAWING -> {
+                if (!held.isOf(Items.BOW)) {
+                    stopRangedCombat(server, session, distance);
+                } else if (session.tick >= session.rangedNextTick) {
+                    // BowItem schiesst beim Ende des Haltens; ein use continuous ohne Release laedt nur.
+                    HeroBotAdapter.setUsing(server, session.botName, false);
+                    session.rangedPhase = RangedPhase.BOW_RELOAD_WAIT;
+                    session.rangedNextTick = session.tick + 2;
+                    TrainingLog.event("RANGE_FIRE bot=" + session.botName + " item=bow");
+                }
+            }
+            case BOW_RELOAD_WAIT -> {
+                if (session.tick >= session.rangedNextTick) {
+                    if (hasArrows(bot)) {
+                        HeroBotAdapter.setUsing(server, session.botName, true);
+                        session.rangedPhase = RangedPhase.BOW_DRAWING;
+                        session.rangedNextTick = session.tick + BOW_DRAW_TICKS;
+                    } else {
+                        stopRangedCombat(server, session, distance);
+                    }
+                }
+            }
+            case CROSSBOW_LOADING -> {
+                if (!held.isOf(Items.CROSSBOW)) {
+                    stopRangedCombat(server, session, distance);
+                } else if (CrossbowItem.isCharged(held)) {
+                    HeroBotAdapter.setUsing(server, session.botName, false);
+                    session.rangedPhase = RangedPhase.CROSSBOW_FIRE_PENDING;
+                    session.rangedNextTick = session.tick + 1;
+                    session.rangedRetries = 0;
+                    TrainingLog.event("RANGE_LOADED bot=" + session.botName + " item=crossbow");
+                } else if (!hasCrossbowProjectiles(bot)) {
+                    stopRangedCombat(server, session, distance);
+                }
+            }
+            case CROSSBOW_FIRE_PENDING -> {
+                if (session.tick >= session.rangedNextTick) {
+                    HeroBotAdapter.useOnce(server, session.botName);
+                    session.rangedPhase = RangedPhase.CROSSBOW_VERIFY;
+                    session.rangedNextTick = session.tick + 1;
+                }
+            }
+            case CROSSBOW_VERIFY -> {
+                if (session.tick >= session.rangedNextTick) {
+                    if (!CrossbowItem.isCharged(held)) {
+                        session.rangedPhase = RangedPhase.CROSSBOW_RELOAD_WAIT;
+                        session.rangedNextTick = session.tick + 1;
+                        TrainingLog.event("RANGE_FIRE bot=" + session.botName + " item=crossbow");
+                    } else if (session.rangedRetries++ == 0) {
+                        // HeroBot verarbeitet use once im naechsten Bot-Tick; ein Retry faengt
+                        // einen verpassten Slot-/Use-Tick ab, ohne endlos am selben Schuss zu haengen.
+                        HeroBotAdapter.useOnce(server, session.botName);
+                        session.rangedNextTick = session.tick + 1;
+                    } else {
+                        stopRangedCombat(server, session, distance);
+                    }
+                }
+            }
+            case CROSSBOW_RELOAD_WAIT -> {
+                if (session.tick >= session.rangedNextTick) {
+                    if (hasCrossbowProjectiles(bot)) {
+                        HeroBotAdapter.setUsing(server, session.botName, true);
+                        session.rangedPhase = RangedPhase.CROSSBOW_LOADING;
+                    } else {
+                        stopRangedCombat(server, session, distance);
+                    }
+                }
+            }
+            case IDLE -> stopRangedCombat(server, session, distance);
+        }
+    }
+
+    private static void startCrossbowShot(MinecraftServer server, Session session,
+                                          ServerPlayerEntity bot, int slot, double distance) {
+        if (bot.getInventory().getSelectedSlot() != slot) {
+            HeroBotAdapter.selectHotbar(server, session.botName, slot);
+        }
+        HeroBotAdapter.setUsing(server, session.botName, false);
+        session.rangedSlot = slot;
+        session.rangedActive = true;
+        session.rangedPhase = RangedPhase.CROSSBOW_FIRE_PENDING;
+        session.rangedNextTick = session.tick + 1;
+        session.rangedRetries = 0;
+        logRangedStart(session, bot, slot, distance, "CROSSBOW_FIRE");
+    }
+
+    private static void logRangedStart(Session session, ServerPlayerEntity bot, int slot,
+                                       double distance, String phase) {
+        TrainingLog.event("RANGE_START bot=" + session.botName
+                + " item=" + itemPath(bot.getInventory().getStack(slot))
+                + " slot=" + slot + " phase=" + phase
+                + " distance=" + String.format(Locale.ROOT, "%.2f", distance));
+    }
+
+    private static void stopRangedCombat(MinecraftServer server, Session session, double distance) {
+        HeroBotAdapter.setUsing(server, session.botName, false);
+        TrainingLog.event("RANGE_STOP bot=" + session.botName
+                + " distance=" + String.format(Locale.ROOT, "%.2f", distance));
+        clearRangedState(session);
+    }
+
+    private static void cancelRangedCombat(MinecraftServer server, Session session, String reason) {
+        if (!session.rangedActive) {
+            return;
+        }
+        HeroBotAdapter.setUsing(server, session.botName, false);
+        TrainingLog.event("RANGE_STOP bot=" + session.botName + " reason=" + reason);
+        clearRangedState(session);
+    }
+
+    private static void clearRangedState(Session session) {
+        session.rangedActive = false;
+        session.rangedPhase = RangedPhase.IDLE;
+        session.rangedSlot = -1;
+        session.wTapNeedsRestart = false;
+    }
+
+    private static int findChargedCrossbowSlot(ServerPlayerEntity bot) {
+        for (int slot = 0; slot < 9; slot++) {
+            ItemStack stack = bot.getInventory().getStack(slot);
+            if (stack.isOf(Items.CROSSBOW) && CrossbowItem.isCharged(stack)) {
+                return slot;
+            }
+        }
+        return -1;
     }
 
     /** Beim Rückzug eine Wind Charge werfen (Rückstoß für Abstand). */
@@ -1056,14 +1241,26 @@ final class TrainingController {
         return -1;
     }
 
-    /** Pfeile im Inventar (Hotbar oder Rucksack), nur der Bogen braucht sie. */
+    /** Pfeile im Inventar oder in der Offhand (einschliesslich Spektral- und Effektpfeile). */
     private static boolean hasArrows(ServerPlayerEntity bot) {
         for (int slot = 0; slot < 36; slot++) {
-            if (bot.getInventory().getStack(slot).isOf(Items.ARROW)) {
+            if (isArrow(bot.getInventory().getStack(slot))) {
                 return true;
             }
         }
-        return false;
+        return isArrow(bot.getOffHandStack());
+    }
+
+    private static boolean hasCrossbowProjectiles(ServerPlayerEntity bot) {
+        return hasArrows(bot) || bot.getOffHandStack().isOf(Items.FIREWORK_ROCKET);
+    }
+
+    private static boolean isArrow(ItemStack stack) {
+        if (stack.isEmpty()) {
+            return false;
+        }
+        String path = itemPath(stack);
+        return path.equals("arrow") || path.equals("spectral_arrow") || path.equals("tipped_arrow");
     }
 
     /**
@@ -1225,6 +1422,11 @@ final class TrainingController {
         double distance = bot.distanceTo(target);
         if (distance < CRYSTAL_MIN_DISTANCE || distance > CRYSTAL_MAX_DISTANCE
                 || bot.getHealth() < CRYSTAL_MIN_HEALTH
+                || !bot.getOffHandStack().isOf(Items.TOTEM_OF_UNDYING)
+                || session.retreating || session.healing
+                || session.pendingCritAttackTick != NO_PENDING_CRIT
+                || session.pendingHotbarRestore >= 0 || session.pendingSplashRestore
+                || session.pendingRestoreSlotA >= 0 || session.pendingRestoreSlotB >= 0
                 || session.tick - session.lastCrystalTick < CRYSTAL_COOLDOWN_TICKS) {
             return;
         }
@@ -1233,33 +1435,101 @@ final class TrainingController {
         if (crystalSlot < 0) {
             return;
         }
+        int obsidianSlot = findHotbarSlot(bot, Items.OBSIDIAN);
+        BlockPos base = findCrystalBase(bot, target, obsidianSlot);
+        if (base == null) {
+            return;
+        }
 
-        // Zielposition: 1,2 Blöcke vor dem Bot auf dessen Bodenhöhe.
-        Vec3d toTarget = new Vec3d(target.getX() - bot.getX(), 0.0, target.getZ() - bot.getZ()).normalize();
-        Vec3d ground = new Vec3d(bot.getX() + toTarget.x * 1.2,
-                Math.floor(bot.getY()) - 1.0, bot.getZ() + toTarget.z * 1.2);
-
-        session.crystalBase = ground;
+        session.crystalBase = new Vec3d(base.getX(), base.getY(), base.getZ());
         session.crystalReturnSlot = bot.getInventory().getSelectedSlot();
         session.lastCrystalTick = session.tick;
         session.crystalNextTick = session.tick + 1;
 
-        // Obsidian-Basis vorhanden? End-Crystals brauchen Obsidian oder Bedrock.
-        if (isCrystalBaseAt(bot, ground)) {
+        // Eine neue Obsidian-Basis wird auf den festen Block unter der Position gesetzt.
+        if (isCrystalBaseAt(bot, session.crystalBase)) {
             session.crystalPhase = CrystalPhase.OBIS_PLACED;
         } else {
-            int obiSlot = findHotbarSlot(bot, Items.OBSIDIAN);
-            if (obiSlot < 0) {
-                session.crystalPhase = CrystalPhase.IDLE;
-                return; // keine Basis -> kein sinnvoller Blast
-            }
-            // Phase 1: Blicke, Slot und Wurf — das Auswerten passiert im Folgetick.
-            HeroBotAdapter.selectHotbar(server, session.botName, obiSlot);
-            HeroBotAdapter.lookAtPosition(server, session.botName, ground, 1);
+            HeroBotAdapter.selectHotbar(server, session.botName, obsidianSlot);
+            Vec3d supportTop = new Vec3d(base.getX() + 0.5, base.getY(), base.getZ() + 0.5);
+            HeroBotAdapter.lookAtPosition(server, session.botName, supportTop, 1);
             HeroBotAdapter.useOnce(server, session.botName);
             session.crystalPhase = CrystalPhase.OBIS_PLACED;
             session.crystalNextTick = session.tick + 2; // Platzierung muss durch sein
+            TrainingLog.event("CRYSTAL_OBI_PLACE bot=" + session.botName + " confirmed=false");
         }
+    }
+
+    private static BlockPos findCrystalBase(ServerPlayerEntity bot, ServerPlayerEntity target,
+                                            int obsidianSlot) {
+        Vec3d offset = new Vec3d(target.getX() - bot.getX(), 0.0,
+                target.getZ() - bot.getZ());
+        double distance = offset.length();
+        if (distance < 1.0E-4) {
+            return null;
+        }
+        Vec3d toward = offset.normalize();
+        Vec3d sideways = new Vec3d(-toward.z, 0.0, toward.x);
+        int feetY = (int) Math.floor(bot.getY());
+        double[] alongFractions = {0.65, 0.75, 0.55, 0.85};
+        double[] sideOffsets = {0.0, 1.0, -1.0, 1.5, -1.5, 2.0, -2.0, 2.5, -2.5};
+
+        for (double fraction : alongFractions) {
+            double along = distance * fraction;
+            for (double side : sideOffsets) {
+                double x = bot.getX() + toward.x * along + sideways.x * side;
+                double z = bot.getZ() + toward.z * along + sideways.z * side;
+                int blockX = (int) Math.floor(x);
+                int blockZ = (int) Math.floor(z);
+                BlockPos[] candidates = {
+                        new BlockPos(blockX, feetY - 1, blockZ),
+                        new BlockPos(blockX, feetY, blockZ)
+                };
+                for (BlockPos base : candidates) {
+                    boolean existingBase = isCrystalBaseAt(bot,
+                            new Vec3d(base.getX(), base.getY(), base.getZ()));
+                    if (!existingBase) {
+                        if (base.getY() != feetY || obsidianSlot < 0
+                                || !bot.getEntityWorld().getBlockState(base).isAir()) {
+                            continue;
+                        }
+                        BlockPos support = base.down();
+                        if (!bot.getEntityWorld().getBlockState(support)
+                                .isSolidBlock(bot.getEntityWorld(), support)) {
+                            continue;
+                        }
+                    }
+                    if (!isCrystalSpaceClear(bot, target, base)) {
+                        continue;
+                    }
+                    Vec3d crystalCenter = new Vec3d(base.getX() + 0.5,
+                            base.getY() + 1.0, base.getZ() + 0.5);
+                    double botDistance = new Vec3d(bot.getX(), bot.getY(), bot.getZ()).distanceTo(crystalCenter);
+                    double targetDistance = new Vec3d(target.getX(), target.getY(), target.getZ()).distanceTo(crystalCenter);
+                    if (botDistance > 4.5 || targetDistance > 5.5
+                            || targetDistance + 0.35 >= botDistance) {
+                        continue;
+                    }
+                    return base;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static boolean isCrystalSpaceClear(ServerPlayerEntity bot, ServerPlayerEntity target,
+                                               BlockPos base) {
+        var world = bot.getEntityWorld();
+        if (!world.getBlockState(base.up()).isAir()
+                || !world.getBlockState(base.up(2)).isAir()) {
+            return false;
+        }
+        // The End Crystal hitbox is 2x2x2; a player/entity in that space blocks placement.
+        Box crystalBox = new Box(base.getX() - 0.5, base.getY() + 1.0, base.getZ() - 0.5,
+                base.getX() + 1.5, base.getY() + 3.0, base.getZ() + 1.5);
+        return !bot.getBoundingBox().intersects(crystalBox)
+                && !target.getBoundingBox().intersects(crystalBox)
+                && world.getOtherEntities(bot, crystalBox, entity -> true).isEmpty();
     }
 
     private static boolean isCrystalBaseAt(ServerPlayerEntity bot, Vec3d pos) {
@@ -1268,26 +1538,46 @@ final class TrainingController {
         return state.isOf(Blocks.OBSIDIAN) || state.isOf(Blocks.BEDROCK);
     }
 
+    private static boolean hasCrystalAt(ServerPlayerEntity bot, BlockPos base) {
+        Vec3d center = new Vec3d(base.getX() + 0.5, base.getY() + 1.0, base.getZ() + 0.5);
+        Box expectedBox = new Box(center.x - 0.35, center.y - 0.35, center.z - 0.35,
+                center.x + 0.35, center.y + 0.35, center.z + 0.35);
+        return !bot.getEntityWorld().getOtherEntities(bot, expectedBox,
+                entity -> entity.getType() == net.minecraft.entity.EntityType.END_CRYSTAL).isEmpty();
+    }
+
     /**
      * Laeuft jeden Tick ( unabhaengig vom Decision-Intervall ), damit die Phasen
      * tatsaechlich auseinanderfallen.
      */
     private static void tickCrystalBlast(MinecraftServer server, Session session,
                                          ServerPlayerEntity bot, ServerPlayerEntity target) {
-        if (session.crystalPhase == CrystalPhase.IDLE || session.crystalPhase == CrystalPhase.DONE) {
+        if (session.crystalPhase == CrystalPhase.IDLE) {
+            return;
+        }
+        if (session.crystalPhase == CrystalPhase.DONE) {
+            if (session.tick >= session.crystalNextTick) {
+                session.crystalPhase = CrystalPhase.IDLE;
+            }
             return;
         }
         if (session.tick < session.crystalNextTick) {
             return;
         }
         Vec3d ground = session.crystalBase;
-        Vec3d crystalBase = ground.add(0.0, 1.0, 0.0); // oben auf dem Bodenblock
 
         switch (session.crystalPhase) {
             case OBIS_PLACED -> {
                 if (!isCrystalBaseAt(bot, ground)) {
                     // Wurf hat nicht gegriffen (Winkel, Abstand oder Kollision) — abbrechen.
-                    TrainingLog.event("CRYSTAL_OBI_FAIL bot=" + session.botName);
+                    TrainingLog.event("CRYSTAL_OBI_FAIL bot=" + session.botName + " confirmed=false");
+                    restoreCrystalSlot(server, session, bot);
+                    session.crystalPhase = CrystalPhase.IDLE;
+                    return;
+                }
+                BlockPos base = BlockPos.ofFloored(ground);
+                if (!isCrystalSpaceClear(bot, target, base)) {
+                    TrainingLog.event("CRYSTAL_SPACE_BLOCKED bot=" + session.botName);
                     restoreCrystalSlot(server, session, bot);
                     session.crystalPhase = CrystalPhase.IDLE;
                     return;
@@ -1299,18 +1589,43 @@ final class TrainingController {
                     return;
                 }
                 HeroBotAdapter.selectHotbar(server, session.botName, crystalSlot);
-                HeroBotAdapter.lookAtPosition(server, session.botName, crystalBase, 1);
+                HeroBotAdapter.lookAtPosition(server, session.botName,
+                        new Vec3d(base.getX() + 0.5, base.getY() + 1.0, base.getZ() + 0.5), 1);
                 HeroBotAdapter.useOnce(server, session.botName);
                 session.crystalPhase = CrystalPhase.CRYSTAL_PLACED;
                 session.crystalNextTick = session.tick + 2;
-                TrainingLog.event("CRYSTAL_OBI_PLACE bot=" + session.botName + " confirmed=true");
+                TrainingLog.event("CRYSTAL_ITEM_USE bot=" + session.botName + " confirmed=false");
             }
             case CRYSTAL_PLACED -> {
-                // Zuenden: Blick auf den Kristall, dann ein Schlag.
-                HeroBotAdapter.lookAtPosition(server, session.botName, crystalBase.add(0.0, 0.5, 0.0), 1);
+                BlockPos base = BlockPos.ofFloored(ground);
+                if (!hasCrystalAt(bot, base)) {
+                    TrainingLog.event("CRYSTAL_PLACE_FAIL bot=" + session.botName + " confirmed=false");
+                    restoreCrystalSlot(server, session, bot);
+                    session.crystalPhase = CrystalPhase.IDLE;
+                    return;
+                }
+                TrainingLog.event("CRYSTAL_PLACE_CONFIRMED bot=" + session.botName + " confirmed=true");
+                Vec3d center = new Vec3d(base.getX() + 0.5, base.getY() + 1.0, base.getZ() + 0.5);
+                double botDistance = new Vec3d(bot.getX(), bot.getY(), bot.getZ()).distanceTo(center);
+                double targetDistance = new Vec3d(target.getX(), target.getY(), target.getZ()).distanceTo(center);
+                if (!bot.getOffHandStack().isOf(Items.TOTEM_OF_UNDYING)
+                        || bot.getHealth() < CRYSTAL_MIN_HEALTH
+                        || targetDistance + 0.35 >= botDistance) {
+                    TrainingLog.event("CRYSTAL_DETONATE_ABORT bot=" + session.botName + " reason=self_risk");
+                    HeroBotAdapter.lookAtEntityNow(server, session.botName, session.targetName);
+                    HeroBotAdapter.move(server, session.botName, "backward");
+                    HeroBotAdapter.setSprint(server, session.botName, true);
+                    restoreCrystalSlot(server, session, bot);
+                    session.crystalPhase = CrystalPhase.DONE;
+                    session.crystalNextTick = session.tick + 1;
+                    return;
+                }
+                // Detonate the verified entity, rather than swinging at an assumed location.
+                HeroBotAdapter.lookAtPosition(server, session.botName, center, 1);
                 HeroBotAdapter.attackOnce(server, session.botName);
                 restoreCrystalSlot(server, session, bot);
-                session.crystalPhase = CrystalPhase.IDLE;
+                session.crystalPhase = CrystalPhase.DONE;
+                session.crystalNextTick = session.tick + 1;
                 TrainingLog.event("CRYSTAL_DETONATE bot=" + session.botName + " target=" + session.targetName
                         + " distance=" + String.format(Locale.ROOT, "%.2f", bot.distanceTo(target)));
             }
@@ -1365,20 +1680,23 @@ final class TrainingController {
         }
     }
 
-    /** Angriffs-Cooldown der Waffe in Ticks (1.9+-Combat). Ziel: >=84,8 % -> Crit/SB/Sweep möglich. */
-    private static int weaponCooldownTicks(ItemStack stack) {
-        if (stack.isEmpty()) return 20;
-        String path = itemPath(stack);
-        if (path.endsWith("_sword")) return 11;
-        if (path.endsWith("_axe")) return 17;
-        if (path.equals("mace")) return 28;
-        if (path.endsWith("_spear")) return 12;
-        if (path.equals("trident")) return 20;
-        return 20;
+    /**
+     * Zeit bis zur wirksamen Angriffsschwelle aus dem tatsaechlichen Attack-Speed-Attribut.
+     * Speere verlangen fuer den Jab die volle Aufladung; andere Waffen nutzen 84,8 %.
+     */
+    private static int weaponCooldownTicks(ServerPlayerEntity bot) {
+        double attackSpeed = bot.getAttributeValue(EntityAttributes.ATTACK_SPEED);
+        if (attackSpeed <= 0.0) {
+            return 20;
+        }
+        double fullCooldown = 20.0 / attackSpeed;
+        double requiredCharge = itemPath(bot.getMainHandStack()).endsWith("_spear") ? 1.0 : 0.848;
+        return Math.max(1, (int) Math.ceil(requiredCharge * fullCooldown - 0.5));
     }
 
     private static void tryCritMelee(MinecraftServer server, Session session,
-                                     ServerPlayerEntity bot, ServerPlayerEntity target, double distance) {
+                                     ServerPlayerEntity bot, ServerPlayerEntity target, double distance,
+                                     QLearningPolicy.Action movementAction) {
         // Laufender Crit-Nachschlag wird von tickCritAttack() abgearbeitet, nicht hier.
         if (session.pendingCritAttackTick != NO_PENDING_CRIT) {
             return;
@@ -1388,14 +1706,15 @@ final class TrainingController {
             return;
         }
         // Waffen-Cooldown-Gate: erster Schlag sofort, danach erst, wenn die Waffe wieder 84,8 % hat.
-        int needed = weaponCooldownTicks(bot.getMainHandStack());
+        int needed = weaponCooldownTicks(bot);
         if (session.lastManualAttackTick > 0
                 && session.tick - session.lastManualAttackTick < needed) {
             return;
         }
         HeroBotAdapter.lookAtEntityNow(server, session.botName, session.targetName);
         boolean nearCritSpam = distance <= 2.5;
-        boolean goCrit = nearCritSpam || session.meleeSwingCount % 3 == 2;
+        boolean spear = itemPath(bot.getMainHandStack()).endsWith("_spear");
+        boolean goCrit = !spear && (nearCritSpam || session.meleeSwingCount % 3 == 2);
         if (goCrit && bot.isOnGround()) {
             HeroBotAdapter.jump(server, session.botName);
             // Nur PLANNEN, nicht schlagen: der Angriff muss in der fallenden Phase landen
@@ -1416,11 +1735,16 @@ final class TrainingController {
         // W-Tap-Pfad (kein Crit): Treffer MIT Sprint (Knockback-Bonus), Sprint DANACH
         // kurz loslassen, damit der naechste Treffer wieder ein Sprint-Schlag ist.
         // Vanilla erlaubt nicht beides — Sprint-KB und Crit schliessen sich aus.
+        if (movementAction == QLearningPolicy.Action.HOLD) {
+            execute(server, "player " + session.botName + " move forward");
+        }
+        HeroBotAdapter.setSprint(server, session.botName, true);
         HeroBotAdapter.attackOnce(server, session.botName);
         session.meleeSwingCount++;
         session.lastManualAttackTick = session.tick;
-        session.wTapUntilTick = session.tick + W_TAP_RELEASE_TICKS;
-        HeroBotAdapter.setSprint(server, session.botName, false);
+        session.pendingSprintReleaseTick = session.tick + 1;
+        session.wTapUntilTick = session.tick + 1 + W_TAP_RELEASE_TICKS;
+        session.wTapNeedsRestart = false;
         TrainingLog.event("MELEE_ATTACK bot=" + session.botName + " target=" + session.targetName
                 + " distance=" + String.format(Locale.ROOT, "%.2f", distance)
                 + " weapon=" + itemPath(bot.getMainHandStack())
@@ -1460,6 +1784,8 @@ final class TrainingController {
         // setSprint(false) wirkt sofort (BotPlayerActionPack.setSprinting ruft
         // player.setSprinting direkt auf), attackOnce erst im naechsten onUpdate.
         session.wTapUntilTick = session.tick + W_TAP_RELEASE_TICKS;
+        session.pendingSprintReleaseTick = NO_PENDING_CRIT;
+        session.wTapNeedsRestart = false;
         HeroBotAdapter.setSprint(server, session.botName, false);
         HeroBotAdapter.attackOnce(server, session.botName);
         session.meleeSwingCount++;
@@ -1475,6 +1801,7 @@ final class TrainingController {
     }
 
     private static boolean startHealing(MinecraftServer server, Session session, ServerPlayerEntity bot) {
+        cancelRangedCombat(server, session, "healing");
         int appleSlot = -1;
         for (int slot = 0; slot < 36; slot++) {
             if (bot.getInventory().getStack(slot).isOf(Items.GOLDEN_APPLE)
@@ -1515,6 +1842,7 @@ final class TrainingController {
     }
 
     private static boolean startEating(MinecraftServer server, Session session, ServerPlayerEntity bot) {
+        cancelRangedCombat(server, session, "eating");
         int foodSlot = -1;
         for (int slot = 0; slot < 36; slot++) {
             if (isFood(bot.getInventory().getStack(slot))) {
@@ -1790,7 +2118,13 @@ final class TrainingController {
         private long lastSplashDamageTick = Long.MIN_VALUE / 2;
         /** W-Tap: bis zu diesem Tick Sprint nach einem Treffer aus -> jeder Hit wird Sprint-KB-Angriff. */
         private long wTapUntilTick;
+        private long pendingSprintReleaseTick = NO_PENDING_CRIT;
+        private boolean wTapNeedsRestart;
         private boolean rangedActive;
+        private RangedPhase rangedPhase = RangedPhase.IDLE;
+        private long rangedNextTick;
+        private int rangedSlot = -1;
+        private int rangedRetries;
         private int meleeSwingCount;
         private String previousState;
         private QLearningPolicy.Action previousAction;
@@ -1833,5 +2167,15 @@ final class TrainingController {
         /** Crystal wurde gesetzt; naechster Tick zundet. */
         CRYSTAL_PLACED,
         DONE
+    }
+
+    private enum RangedPhase {
+        IDLE,
+        BOW_DRAWING,
+        BOW_RELOAD_WAIT,
+        CROSSBOW_LOADING,
+        CROSSBOW_FIRE_PENDING,
+        CROSSBOW_VERIFY,
+        CROSSBOW_RELOAD_WAIT
     }
 }

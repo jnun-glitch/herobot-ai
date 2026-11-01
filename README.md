@@ -52,22 +52,23 @@ Ein Elytra-Mace-Manöver startet automatisch, sobald der Bot tatsächlich eine a
 
 Der Bot wechselt aktiv zwischen seinen Hotbar-Slots und nutzt die mitgeführten Items situationsabhängig:
 
-- **Bogen / Armbrust (Fernkampf):** Ab 8 Blöcken Abstand greift er nach Bogen oder Armbrust (Armbrust hat Vorrang, da bereits geladen), hält die Benutzung und schiesst, bis das Ziel auf 5 Blöcke heran ist. Er bleibt beim Schiessen stehen und läuft nicht ins Messer. Ohne Pfeile im Inventar greift er nicht zum Bogen.
+- **Bogen / Armbrust (Fernkampf):** Ab 8 Blöcken Abstand nimmt er zuerst eine geladene Armbrust, sonst einen Bogen mit Munition. Der Bogen wird 20 Ticks gespannt und zum Schuss freigegeben; eine ungeladene Armbrust wird geladen, getrennt abgefeuert und bei vorhandener Munition wieder geladen. Bei 5 Blöcken stoppt der Fernkampf. Ohne freie Sicht oder passende Munition schiesst er nicht.
 - **Splash-Potions:** Ohne Stärke- oder Schnelligkeitseffekt wirft er beim Kampfbeginn die passende Splash-Potion unter seine Füße (Potion-Typ wird über die Item-Komponente erkannt).
 - **Wind Charge:** Beim Rückzug unter 4 Herzen wirft er eine Wind Charge, um per Rückstoß Abstand zu gewinnen.
 - **Axt gegen Schild und Totem in den Offhand:** wie zuvor, unverändert.
 
 ### Nahkampf-Taktiken (aus Wiki-Recherche, minecraft.wiki)
 
-- **Waffen-Cooldown-Gate:** Er schlägt nicht mehr starr alle 12 Ticks, sondern erst, wenn die konkrete Waffe wieder bereit ist (Schwert 11, Axt 17, Mace 28, Speer 12 Ticks) — also ab ca. 84,8 % ihres Cooldowns. Unter dieser Schwelle wäre der Schlag ein normaler Treffer ohne Crit, Sweep und Knockback.
-- **W-Tap (Sprint-Reset):** Nach jedem Treffer lässt er 2 Ticks den Sprint los. Ein laufender Spieler-Schlag drückt das Ziel weiter weg; erst nach dem Neustarten des Sprints trifft der nächste Schlag mit vollem Knockback. Das Bewegungs-Update respektiert dieses Fenster und schaltet den Sprint nicht vorzeitig wieder an.
+- **Waffen-Cooldown-Gate:** Der Bot berechnet die Angriffsschwelle aus dem aktiven Attack-Speed-Attribut. Das berücksichtigt die tatsächliche Waffe und Effekte; Speer-Jabs warten auf volle Aufladung, andere Nahkampfangriffe auf mindestens 84,8 %.
+- **W-Tap (Sprint-Reset):** Sprint bleibt bis zum Bot-Tick des Schlages an. Danach setzt der Bot Sprint für 2 Ticks zurück und startet ihn für den folgenden Sprint-Knockback-Schlag erneut. Crits bleiben ein eigener Pfad, weil Sprint-Knockback in Java Vorrang vor einem Crit hat.
 - **Crit-Spam auf kurzer Distanz:** Bis 2,5 Blöcke springt er vor fast jedem Schlag und schlägt in der fallenden Phase (1,5-facher Schaden, rund 1,6 Crit/s). Auf weiterer Distanz behält er das alte Muster „alle 3 Schwünge" bei, weil der Sprungzyklus dort sonst den Angriffs-Rhythmus ausbremst.
 - **Schild-Stunning:** Blockt der Gegner, schlägt er zweimal im selben Tick zu (`attack twice`) — vorausgesetzt HeroBots `shieldStunning` ist aktiv (setzt die Mod beim Kampfstart).
+- **Crystal-PvP:** Er setzt Kristalle nur mit Totem in der Offhand und genügend Platz; die Zielposition darf weder Spieler noch andere Entitäten schneiden und muss näher am Gegner als am Bot liegen. Basis und Kristall werden in getrennten Ticks bestätigt, bevor der Bot zuschlägt.
 - **Enderperlen:** Nach dem Wurf setzt sie den Perlen-Cooldown sofort zurück (`itemCd reset`), kann also sofort wieder geworfen werden.
 
 ## Debugging und manuelles Feedback
 
-Das Kampf-Log in `config/herobot-ai-training/fight-data.csv` protokolliert Waffenwechsel, Schild-Heben/Senken, Heilungs- und Essensstarts, Rückzug, Perlen- und Crystal-Einsatz sowie jeden Lernschritt mit Zustand, Aktion und Belohnung. Neu dazugekommen: `RANGE_DRAW`/`RANGE_STOP` (Bogen/Armbrust im Fernkampf), `SPLASH_BUFF` (Stärke/Schnelligkeit geworfen), `WIND_CHARGE` (Rückstoß beim Rückzug), `SHIELD_STUN` (Doppelschlag gegen blockende Gegner) und `COMBAT_SETTINGS` (shieldStunning + noProjectileRandom beim Kampfstart). Beim Kampfstart setzt die Mod zusätzlich HeroBots `shieldStunning` und `noProjectileRandom`, damit `attack twice` Schilder stunnt und die Bogenschüsse treffen.
+Das Kampf-Log in `config/herobot-ai-training/fight-data.csv` protokolliert Waffenwechsel, Schild-Heben/Senken, Heilungs- und Essensstarts, Rückzug, Perlen- und Crystal-Einsatz sowie jeden Lernschritt mit Zustand, Aktion und Belohnung. Der Fernkampf meldet `RANGE_START`, `RANGE_LOADED`, `RANGE_FIRE` und `RANGE_STOP`; Crystal-Ereignisse unterscheiden zwischen angefordertem und bestätigtem Platzieren. Beim Kampfstart setzt die Mod HeroBots `shieldStunning` und `noProjectileRandom`, damit `attack twice` Schilder stunnt und Projektilstreuung deaktiviert ist.
 
 Der ModMenu-Bildschirm lässt dich neun Fähigkeiten auf **Unbekannt**, **Kann** oder **Kann nicht** setzen und Beobachtungen ergänzen. **Bericht kopieren** sammelt Feedback und Diagnoseinformationen. Diese manuellen Markierungen werden gespeichert und mit dem Bericht ausgegeben; sie ändern die Q-Learning-Policy nicht automatisch.
 
@@ -82,7 +83,7 @@ Auf einem dedizierten Server liegen Kampf-Log und Q-Modell serverseitig. Sie wer
 
 ## Grenzen
 
-Das Modell ist tabulares Q-Learning, kein neuronales Netz. Es lernt Bewegungsentscheidungen aus Kampfbelohnungen sowie — nur positiv — aus den Aktionen des menschlichen Gegners; Essen, Rückzug, Schild, Waffenwechsel und der Crystal-Einsatz sind regelbasierte Zusätze. Nahkampfangriffe werden manuell getaktet; nur während des Mace-Sturzangriffs läuft HeroBots Angriff kontinuierlich. Komplexe Hindernisse, echte Umwege, Spawn-Schutz-Erkennung und vollständiges Pathfinding sind nicht enthalten. Die Crystal-Routine setzt voraus, dass HeroBot `use` auf dem Boden vor dem Bot, `use` auf der Obsidian-Basis und `attack` auf dem Kristall ausführt; das muss im Spiel bestätigt werden.
+Das Modell ist tabulares Q-Learning, kein neuronales Netz. Es lernt Bewegungsentscheidungen aus Kampfbelohnungen sowie — nur positiv — aus den Aktionen des menschlichen Gegners; Essen, Rückzug, Schild, Waffenwechsel und Crystal-Einsatz sind regelbasierte Zusätze. Nahkampfangriffe werden manuell getaktet; nur während des Mace-Sturzangriffs läuft HeroBots Angriff kontinuierlich. Komplexe Hindernisse, echte Umwege, Spawn-Schutz-Erkennung und vollständiges Pathfinding sind nicht enthalten. Die Kampfabläufe wurden anhand der Quelllogik und Spielregeln geprüft; ein Live-Duell wurde hier nicht ausgeführt.
 
 ## Build
 

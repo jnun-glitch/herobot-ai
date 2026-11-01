@@ -18,6 +18,7 @@ import net.minecraft.util.math.Vec3d;
 
 import java.util.Locale;
 import java.util.Set;
+import java.util.function.Predicate;
 
 final class TrainingController {
     private static final int DECISION_INTERVAL_TICKS = 5;
@@ -147,7 +148,8 @@ final class TrainingController {
         // Wiki-Einstellungen einmalig pro Kampf: Schild-Stunning (Herobot shieldStunning)
         // und
         // perfektreichweite Projektile (Bogen/Armbrust ohne Streuung).
-        HeroBotAdapter.applyCombatSettings(server);
+        HeroBotAdapter.CombatSettingsSnapshot previousCombatSettings =
+                HeroBotAdapter.applyCombatSettings(server);
         TrainingLog.event("COMBAT_SETTINGS bot=" + botName + " shieldStunning=true noProjectileRandom=true");
         if (kit == PvPKit.COPY) {
             HeroBotAdapter.copyInventory(bot, target);
@@ -161,12 +163,13 @@ final class TrainingController {
         HeroBotAdapter.stopAll(server, botName);
         if (!kit.isReady(bot)) {
             execute(server, "player " + botName + " disconnect");
+            HeroBotAdapter.restoreCombatSettings(server, previousCombatSettings);
             source.sendError(Text.literal("Das Kit " + kit.commandName() + " konnte nicht ausgerüstet werden. Prüfe HeroBot-Serverlogs."));
             TrainingLog.error("Duel kit setup failed bot=" + botName + " kit=" + kit.commandName());
             return;
         }
-        QLearningPolicy policy = new QLearningPolicy();
-        active = new Session(server, botName, targetName, policy, kit);
+        QLearningPolicy policy = new QLearningPolicy(kit);
+        active = new Session(server, botName, targetName, policy, kit, previousCombatSettings);
         Session startedSession = active;
         if (hasMaceFlightLoadout(bot)) {
             startedSession.maceLoadout = true;
@@ -244,6 +247,7 @@ final class TrainingController {
         maybeRestartMaceOpener(session, bot, target);
         // Verschobene Slot-Restauration: erst jetzt, also einen Tick nach der Aktion.
         applyPendingRestores(server, session, bot);
+        maintainTotemSafety(server, session, bot);
         if (session.macePhase != MacePhase.DONE) {
             tickMaceOpener(session, bot, target);
             return;
@@ -259,8 +263,7 @@ final class TrainingController {
             return;
         }
 
-        String state = session.policy.observe(bot.distanceTo(target), bot.getHealth(), target.getHealth(),
-                target.isOnGround(), isBlocking(target), hasAxe(bot));
+        String state = combatState(session, bot, target);
         double botDamage = session.lastBotHealth - bot.getHealth();
         double targetDamage = session.lastTargetHealth - target.getHealth();
         double reward = targetDamage - 1.2 * botDamage;
@@ -396,18 +399,21 @@ final class TrainingController {
             tryCrystalBlast(server, session, bot, target);
         }
         boolean crystalBusy = session.crystalPhase != CrystalPhase.IDLE;
+        boolean nativePathing = updatePathing(server, session, bot, target,
+                !rangedActive && !session.retreating && !session.healing && !crystalBusy
+                        && session.macePhase == MacePhase.DONE);
         if (crystalBusy) {
             // Phase actions need to keep their selected slot and view until HeroBot handles use once.
             HeroBotAdapter.stopMovement(server, session.botName);
             HeroBotAdapter.setSprint(server, session.botName, false);
             action = QLearningPolicy.Action.HOLD;
-        } else {
+        } else if (!nativePathing) {
             applyAction(server, session, bot, target, action);
             if (action == QLearningPolicy.Action.STRAFE_LEFT || action == QLearningPolicy.Action.STRAFE_RIGHT) {
                 lookAtCombatTarget(server, session, target);
             }
         }
-        if (!rangedActive && !crystalBusy) {
+        if (!rangedActive && !crystalBusy && session.itemLease == null) {
             tryCritMelee(server, session, bot, target, distance, action);
         }
         TrainingLog.record(session.tick, session.botName, session.targetName, state, action, reward, false);
@@ -419,6 +425,47 @@ final class TrainingController {
         if (session.decisions++ % 20 == 0) {
             session.policy.save();
         }
+    }
+
+    /** Uses HeroBot's own path command only for obstructed pursuit; otherwise normal movement remains active. */
+    private static boolean updatePathing(MinecraftServer server, Session session,
+                                         ServerPlayerEntity bot, ServerPlayerEntity target, boolean allowed) {
+        boolean needsPath = allowed && session.nativePathSupported && !bot.canSee(target)
+                && bot.distanceTo(target) > 3.5;
+        if (!needsPath) {
+            if (session.pathing) HeroBotAdapter.stopPathing(server, session.botName);
+            session.pathing = false;
+            session.stuckChecks = 0;
+            session.lastPathProgressPosition = null;
+            return false;
+        }
+        if (!session.pathing) {
+            HeroBotAdapter.pathToEntity(server, session.botName, session.targetName);
+            session.pathing = true;
+            session.lastPathCommandTick = session.tick;
+            session.lastPathProgressPosition = new Vec3d(bot.getX(), bot.getY(), bot.getZ());
+            session.stuckChecks = 0;
+            TrainingLog.event("PATH_START bot=" + session.botName + " target=" + session.targetName);
+            return true;
+        }
+        if (session.tick - session.lastPathCommandTick >= 10) {
+            if (session.lastPathProgressPosition != null
+                    && new Vec3d(bot.getX(), bot.getY(), bot.getZ())
+                    .squaredDistanceTo(session.lastPathProgressPosition) < 0.09) {
+                session.stuckChecks++;
+            } else {
+                session.stuckChecks = 0;
+            }
+            session.lastPathProgressPosition = new Vec3d(bot.getX(), bot.getY(), bot.getZ());
+            if (session.stuckChecks >= 2 && session.tick - session.lastPathCommandTick >= 20) {
+                HeroBotAdapter.stopPathing(server, session.botName);
+                HeroBotAdapter.pathToEntity(server, session.botName, session.targetName);
+                session.lastPathCommandTick = session.tick;
+                session.stuckChecks = 0;
+                TrainingLog.event("PATH_RETRY bot=" + session.botName + " target=" + session.targetName);
+            }
+        }
+        return true;
     }
 
     static void afterDeath(LivingEntity entity) {
@@ -789,7 +836,6 @@ final class TrainingController {
 
     private static boolean moveTotemToOffhand(ServerPlayerEntity bot) {
         if (bot.getOffHandStack().isOf(Items.TOTEM_OF_UNDYING)) return true;
-        if (!bot.getOffHandStack().isEmpty()) return false;
         for (int slot = 0; slot < 36; slot++) {
             ItemStack candidate = bot.getInventory().getStack(slot);
             if (candidate.isOf(Items.TOTEM_OF_UNDYING)) {
@@ -802,11 +848,48 @@ final class TrainingController {
         return false;
     }
 
-    private static void updateShield(Session session, ServerPlayerEntity bot, ServerPlayerEntity target) {
-        boolean hasShield = moveShieldToOffhand(bot);
-        if (!hasShield) {
-            moveTotemToOffhand(bot);
+    /** Replaces a popped totem immediately and double-hands a reserve only during lethal danger. */
+    private static void maintainTotemSafety(MinecraftServer server, Session session, ServerPlayerEntity bot) {
+        boolean recentDamage = session.tick - session.lastBotDamageTick <= 10;
+        boolean totemPriority = session.kit == PvPKit.CRYSTAL || bot.getHealth() <= HEAL_HEALTH_THRESHOLD
+                || recentDamage;
+        if (totemPriority && !bot.getOffHandStack().isOf(Items.TOTEM_OF_UNDYING)) {
+            boolean replaced = moveTotemToOffhand(bot);
+            if (replaced) {
+                if (session.shielding) {
+                    HeroBotAdapter.setUsing(server, session.botName, false);
+                    session.shielding = false;
+                }
+                TrainingLog.event("TOTEM_OFFHAND bot=" + session.botName + " replacement=true");
+            }
         }
+
+        boolean lethalDanger = bot.getHealth() <= 5.0F
+                || (bot.getHealth() <= 8.0F && recentDamage);
+        if (lethalDanger && !session.totemDoubleHandLease && session.itemLease == null
+                && !session.healing && !session.rangedActive) {
+            ItemLease lease = equipItemForHeroBot(server, session, bot,
+                    stack -> stack.isOf(Items.TOTEM_OF_UNDYING));
+            if (lease != null) {
+                session.itemLeaseRestoreTick = Long.MAX_VALUE;
+                session.totemDoubleHandLease = true;
+                TrainingLog.event("TOTEM_DOUBLE_HAND bot=" + session.botName
+                        + " health=" + String.format(Locale.ROOT, "%.1f", bot.getHealth()));
+            }
+        } else if (!lethalDanger && session.totemDoubleHandLease) {
+            restoreItemLease(server, session, bot);
+            session.totemDoubleHandLease = false;
+        }
+    }
+
+    private static void updateShield(Session session, ServerPlayerEntity bot, ServerPlayerEntity target) {
+        boolean totemPriority = session.kit == PvPKit.CRYSTAL
+                || bot.getHealth() <= HEAL_HEALTH_THRESHOLD
+                || session.tick - session.lastBotDamageTick <= 10;
+        boolean hasTotem = bot.getOffHandStack().isOf(Items.TOTEM_OF_UNDYING)
+                || (totemPriority && moveTotemToOffhand(bot));
+        boolean hasShield = !hasTotem && moveShieldToOffhand(bot);
+        if (!hasTotem && !hasShield) hasTotem = moveTotemToOffhand(bot);
         Vec3d toBot = new Vec3d(bot.getX() - target.getX(), 0.0, bot.getZ() - target.getZ()).normalize();
         Vec3d targetFacing = target.getRotationVec(1.0F);
         targetFacing = new Vec3d(targetFacing.x, 0.0, targetFacing.z).normalize();
@@ -850,7 +933,7 @@ final class TrainingController {
         if (session.tick - session.lastMaceOpenerTick < MACE_OPENER_COOLDOWN_TICKS) {
             return;
         }
-        if (session.retreating || session.healing || session.rangedActive) {
+        if (session.retreating || session.healing || session.rangedActive || session.itemLease != null) {
             return;
         }
         if (!bot.isOnGround()) {
@@ -880,8 +963,7 @@ final class TrainingController {
 
         session.maceInitialBotHealth = bot.getHealth();
         session.maceInitialTargetHealth = target.getHealth();
-        session.maceState = session.policy.observe(bot.distanceTo(target), bot.getHealth(),
-                target.getHealth(), target.isOnGround(), isBlocking(target), hasAxe(bot));
+        session.maceState = combatState(session, bot, target);
         HeroBotAdapter.setAttacking(server, session.botName, false);
         HeroBotAdapter.setAutoJump(server, session.botName, false);
         HeroBotAdapter.teleport(server, session.botName,
@@ -916,9 +998,11 @@ final class TrainingController {
         switch (session.macePhase) {
             case WAIT_GLIDE -> {
                 if (bot.isGliding()) {
-                    HeroBotAdapter.selectHotbar(server, session.botName, 1);
                     aimClimb(server, session, bot, target);
-                    HeroBotAdapter.useOnce(server, session.botName);
+                    if (!useItemOnce(server, session, bot, Items.FIREWORK_ROCKET)) {
+                        finishMaceOpener(session, bot, target, "no_rocket_available");
+                        return;
+                    }
                     session.maceBoosts++;
                     session.maceBoostTick = session.tick;
                     session.macePhase = MacePhase.CLIMB;
@@ -941,12 +1025,12 @@ final class TrainingController {
                 }
                 if (session.maceBoosts < 2 && session.tick - session.maceBoostTick >= 18
                         && bot.getY() < target.getY() + MACE_CLIMB_HEIGHT
-                        && bot.getInventory().getStack(1).isOf(Items.FIREWORK_ROCKET)) {
-                    HeroBotAdapter.selectHotbar(server, session.botName, 1);
-                    HeroBotAdapter.useOnce(server, session.botName);
-                    session.maceBoosts++;
-                    session.maceBoostTick = session.tick;
-                    TrainingLog.event("MACE_BOOST bot=" + session.botName + " count=" + session.maceBoosts);
+                        && findInventorySlot(bot, stack -> stack.isOf(Items.FIREWORK_ROCKET)) >= 0) {
+                    if (useItemOnce(server, session, bot, Items.FIREWORK_ROCKET)) {
+                        session.maceBoosts++;
+                        session.maceBoostTick = session.tick;
+                        TrainingLog.event("MACE_BOOST bot=" + session.botName + " count=" + session.maceBoosts);
+                    }
                 }
                 if (bot.getY() >= target.getY() + MACE_CLIMB_HEIGHT
                         || session.macePhaseTicks >= MACE_MAX_CLIMB_TICKS
@@ -983,9 +1067,14 @@ final class TrainingController {
     }
 
     private static void startMaceDive(Session session, ServerPlayerEntity bot, ServerPlayerEntity target) {
+        ItemLease maceLease = equipItemForHeroBot(session.server, session, bot, stack -> stack.isOf(Items.MACE));
+        if (maceLease == null) {
+            finishMaceOpener(session, bot, target, "mace_unavailable");
+            return;
+        }
+        session.itemLeaseRestoreTick = Long.MAX_VALUE;
         session.macePhase = MacePhase.DIVE;
         session.macePhaseTicks = 0;
-        HeroBotAdapter.selectHotbar(session.server, session.botName, 0);
         HeroBotAdapter.lookAtEntityNow(session.server, session.botName, session.targetName);
         HeroBotAdapter.move(session.server, session.botName, "forward");
         HeroBotAdapter.setSprint(session.server, session.botName, true);
@@ -999,12 +1088,12 @@ final class TrainingController {
         double botDamage = Math.max(0.0, session.maceInitialBotHealth - bot.getHealth());
         double targetDamage = Math.max(0.0, session.maceInitialTargetHealth - target.getHealth());
         double reward = targetDamage - 1.2 * botDamage;
-        String nextState = session.policy.observe(bot.distanceTo(target), bot.getHealth(),
-                target.getHealth(), target.isOnGround(), isBlocking(target), hasAxe(bot));
+        String nextState = combatState(session, bot, target);
         session.policy.update(session.maceState, QLearningPolicy.Action.APPROACH, reward, nextState, false);
         TrainingLog.record(session.tick, session.botName, session.targetName, session.maceState,
                 QLearningPolicy.Action.APPROACH, reward, false);
         session.macePhase = MacePhase.DONE;
+        restoreItemLease(session.server, session, bot);
         session.decisions++;
         session.previousState = nextState;
         session.previousAction = QLearningPolicy.Action.APPROACH;
@@ -1031,34 +1120,33 @@ final class TrainingController {
 
         int slot = findChargedCrossbowSlot(bot);
         if (slot >= 0) {
-            startCrossbowShot(server, session, bot, slot, distance);
-            return true;
+            return startCrossbowShot(server, session, bot, slot, distance);
         }
 
-        int bowSlot = findHotbarSlot(bot, Items.BOW);
+        int bowSlot = findInventorySlot(bot, stack -> stack.isOf(Items.BOW));
         if (bowSlot >= 0 && hasArrows(bot)) {
-            if (bot.getInventory().getSelectedSlot() != bowSlot) {
-                HeroBotAdapter.selectHotbar(server, session.botName, bowSlot);
-            }
-            session.rangedSlot = bowSlot;
+            ItemLease lease = equipItemAtSlot(server, session, bot, bowSlot);
+            if (lease == null) return false;
+            session.rangedSlot = lease.hotbarSlot();
+            session.itemLeaseRestoreTick = Long.MAX_VALUE;
             session.rangedActive = true;
             session.rangedPhase = RangedPhase.BOW_DRAWING;
             session.rangedNextTick = session.tick + BOW_DRAW_TICKS;
             HeroBotAdapter.setUsing(server, session.botName, true);
-            logRangedStart(session, bot, bowSlot, distance, "BOW_DRAW");
+            logRangedStart(session, bot, session.rangedSlot, distance, "BOW_DRAW");
             return true;
         }
 
-        int crossbowSlot = findHotbarSlot(bot, Items.CROSSBOW);
+        int crossbowSlot = findInventorySlot(bot, stack -> stack.isOf(Items.CROSSBOW));
         if (crossbowSlot >= 0 && hasCrossbowProjectiles(bot)) {
-            if (bot.getInventory().getSelectedSlot() != crossbowSlot) {
-                HeroBotAdapter.selectHotbar(server, session.botName, crossbowSlot);
-            }
-            session.rangedSlot = crossbowSlot;
+            ItemLease lease = equipItemAtSlot(server, session, bot, crossbowSlot);
+            if (lease == null) return false;
+            session.rangedSlot = lease.hotbarSlot();
+            session.itemLeaseRestoreTick = Long.MAX_VALUE;
             session.rangedActive = true;
             session.rangedPhase = RangedPhase.CROSSBOW_LOADING;
             HeroBotAdapter.setUsing(server, session.botName, true);
-            logRangedStart(session, bot, crossbowSlot, distance, "CROSSBOW_LOAD");
+            logRangedStart(session, bot, session.rangedSlot, distance, "CROSSBOW_LOAD");
             return true;
         }
         return false;
@@ -1152,18 +1240,19 @@ final class TrainingController {
         }
     }
 
-    private static void startCrossbowShot(MinecraftServer server, Session session,
-                                          ServerPlayerEntity bot, int slot, double distance) {
-        if (bot.getInventory().getSelectedSlot() != slot) {
-            HeroBotAdapter.selectHotbar(server, session.botName, slot);
-        }
+    private static boolean startCrossbowShot(MinecraftServer server, Session session,
+                                             ServerPlayerEntity bot, int slot, double distance) {
+        ItemLease lease = equipItemAtSlot(server, session, bot, slot);
+        if (lease == null) return false;
         HeroBotAdapter.setUsing(server, session.botName, false);
-        session.rangedSlot = slot;
+        session.rangedSlot = lease.hotbarSlot();
+        session.itemLeaseRestoreTick = Long.MAX_VALUE;
         session.rangedActive = true;
         session.rangedPhase = RangedPhase.CROSSBOW_FIRE_PENDING;
         session.rangedNextTick = session.tick + 1;
         session.rangedRetries = 0;
-        logRangedStart(session, bot, slot, distance, "CROSSBOW_FIRE");
+        logRangedStart(session, bot, session.rangedSlot, distance, "CROSSBOW_FIRE");
+        return true;
     }
 
     private static void logRangedStart(Session session, ServerPlayerEntity bot, int slot,
@@ -1179,6 +1268,7 @@ final class TrainingController {
         TrainingLog.event("RANGE_STOP bot=" + session.botName
                 + " distance=" + String.format(Locale.ROOT, "%.2f", distance));
         clearRangedState(session);
+        restoreItemLease(server, session, HeroBotAdapter.findPlayer(server, session.botName));
     }
 
     private static void cancelRangedCombat(MinecraftServer server, Session session, String reason) {
@@ -1188,6 +1278,7 @@ final class TrainingController {
         HeroBotAdapter.setUsing(server, session.botName, false);
         TrainingLog.event("RANGE_STOP bot=" + session.botName + " reason=" + reason);
         clearRangedState(session);
+        restoreItemLease(server, session, HeroBotAdapter.findPlayer(server, session.botName));
     }
 
     private static void clearRangedState(Session session) {
@@ -1198,7 +1289,7 @@ final class TrainingController {
     }
 
     private static int findChargedCrossbowSlot(ServerPlayerEntity bot) {
-        for (int slot = 0; slot < 9; slot++) {
+        for (int slot = 0; slot < 36; slot++) {
             ItemStack stack = bot.getInventory().getStack(slot);
             if (stack.isOf(Items.CROSSBOW) && CrossbowItem.isCharged(stack)) {
                 return slot;
@@ -1212,22 +1303,12 @@ final class TrainingController {
         if (session.tick - session.lastWindChargeTick < WIND_CHARGE_COOLDOWN_TICKS) {
             return;
         }
-        int slot = findHotbarSlot(bot, Items.WIND_CHARGE);
-        if (slot < 0) {
+        if (findInventorySlot(bot, stack -> stack.isOf(Items.WIND_CHARGE)) < 0) {
             return;
         }
-        int previousSlot = bot.getInventory().getSelectedSlot();
-        HeroBotAdapter.selectHotbar(server, session.botName, slot);
-        // Nutzen im Slot (Mainhand + Offhand im selben Tick); "once" ist die einzige
-        // zulaessige Variante neben continuous/interval.
-        HeroBotAdapter.useOnce(server, session.botName);
-        // Slot-Rueckwechsel erst im Folgetick (siehe trySplashBuff).
-        if (previousSlot != slot) {
-            session.pendingHotbarRestore = previousSlot;
-        }
+        if (!useItemOnce(server, session, bot, Items.WIND_CHARGE)) return;
         session.lastWindChargeTick = session.tick;
         TrainingLog.event("WIND_CHARGE bot=" + session.botName
-                + " slot=" + slot
                 + " offhand=" + itemPath(bot.getEquippedStack(net.minecraft.entity.EquipmentSlot.OFFHAND)));
     }
 
@@ -1239,6 +1320,82 @@ final class TrainingController {
             }
         }
         return -1;
+    }
+
+    /** Finds an item anywhere in the 36-slot player inventory, preferring the selected hotbar slot. */
+    private static int findInventorySlot(ServerPlayerEntity bot, Predicate<ItemStack> matches) {
+        int selected = bot.getInventory().getSelectedSlot();
+        if (matches.test(bot.getInventory().getStack(selected))) return selected;
+        for (int slot = 0; slot < 9; slot++) {
+            if (slot != selected && matches.test(bot.getInventory().getStack(slot))) return slot;
+        }
+        for (int slot = 9; slot < 36; slot++) {
+            if (matches.test(bot.getInventory().getStack(slot))) return slot;
+        }
+        return -1;
+    }
+
+    /**
+     * Temporarily equips an inventory item in a hotbar slot while preserving both stacks.
+     * HeroBot still performs the actual use action; this only prepares its hand.
+     */
+    private static ItemLease equipItemForHeroBot(MinecraftServer server, Session session,
+                                                  ServerPlayerEntity bot, Predicate<ItemStack> matches) {
+        int sourceSlot = findInventorySlot(bot, matches);
+        return equipItemAtSlot(server, session, bot, sourceSlot);
+    }
+
+    private static ItemLease equipItemAtSlot(MinecraftServer server, Session session,
+                                              ServerPlayerEntity bot, int sourceSlot) {
+        if (session.itemLease != null || sourceSlot < 0 || sourceSlot >= 36) return null;
+        int previousSelected = bot.getInventory().getSelectedSlot();
+        int hotbarSlot = sourceSlot < 9 ? sourceSlot : previousSelected;
+        boolean movedFromInventory = sourceSlot >= 9;
+        ItemStack displaced = movedFromInventory
+                ? bot.getInventory().getStack(hotbarSlot).copy() : ItemStack.EMPTY;
+        if (movedFromInventory) {
+            ItemStack wanted = bot.getInventory().getStack(sourceSlot).copy();
+            bot.getInventory().setStack(sourceSlot, displaced.copy());
+            bot.getInventory().setStack(hotbarSlot, wanted);
+        }
+        ItemLease lease = new ItemLease(sourceSlot, hotbarSlot, previousSelected,
+                movedFromInventory, displaced);
+        session.itemLease = lease;
+        session.itemLeaseRestoreTick = Long.MAX_VALUE;
+        if (bot.getInventory().getSelectedSlot() != hotbarSlot) {
+            HeroBotAdapter.selectHotbar(server, session.botName, hotbarSlot);
+        }
+        return lease;
+    }
+
+    private static boolean useItemOnce(MinecraftServer server, Session session,
+                                       ServerPlayerEntity bot, net.minecraft.item.Item item) {
+        int sourceSlot = findInventorySlot(bot, stack -> stack.isOf(item));
+        return useItemOnceFromSlot(server, session, bot, sourceSlot);
+    }
+
+    private static boolean useItemOnceFromSlot(MinecraftServer server, Session session,
+                                                ServerPlayerEntity bot, int sourceSlot) {
+        ItemLease lease = equipItemAtSlot(server, session, bot, sourceSlot);
+        if (lease == null) return false;
+        HeroBotAdapter.useOnce(server, session.botName);
+        session.itemLeaseRestoreTick = session.tick + 1;
+        return true;
+    }
+
+    private static void restoreItemLease(MinecraftServer server, Session session, ServerPlayerEntity bot) {
+        ItemLease lease = session.itemLease;
+        if (lease == null) return;
+        if (bot != null && lease.movedFromInventory()) {
+            ItemStack remainder = bot.getInventory().getStack(lease.hotbarSlot()).copy();
+            bot.getInventory().setStack(lease.sourceSlot(), remainder);
+            bot.getInventory().setStack(lease.hotbarSlot(), lease.displacedStack().copy());
+        }
+        session.itemLease = null;
+        session.itemLeaseRestoreTick = NO_PENDING_CRIT;
+        if (bot != null && bot.getInventory().getSelectedSlot() != lease.previousSelectedSlot()) {
+            HeroBotAdapter.selectHotbar(server, session.botName, lease.previousSelectedSlot());
+        }
     }
 
     /** Pfeile im Inventar oder in der Offhand (einschliesslich Spektral- und Effektpfeile). */
@@ -1268,7 +1425,7 @@ final class TrainingController {
      * den Effekt noch nicht hat. Der Potions-Typ wird über die Komponente gelesen.
      */
     private static void trySplashBuff(MinecraftServer server, Session session, ServerPlayerEntity bot) {
-        if (session.pendingSplashRestore) {
+        if (session.itemLease != null) {
             return;
         }
         if (session.tick - session.lastSplashBuffTick < SPLASH_BUFF_COOLDOWN_TICKS) {
@@ -1284,28 +1441,13 @@ final class TrainingController {
         if (slot < 0) {
             return;
         }
-        int held = bot.getInventory().getSelectedSlot();
-        if (held == slot) {
-            return; // Potion liegt schon in der Hand — nichts zu verschieben
-        }
-        ItemStack savedHeld = bot.getInventory().getStack(held).copy();
-        ItemStack potion = bot.getInventory().getStack(slot).copy();
-        bot.getInventory().setStack(slot, ItemStack.EMPTY);
-        bot.getInventory().setStack(held, potion);
         // Nach unten zielen, damit die Splash-Potion auf den eigenen Füßen platzt.
         HeroBotAdapter.lookAtPosition(server, session.botName,
                 new Vec3d(bot.getX(), bot.getY() - 1.0, bot.getZ()), 1);
-        HeroBotAdapter.useOnce(server, session.botName);
-        // NICHT im selben Tick zuruecktauschen: HeroBot wertet "use once" erst im Folgetick
-        // aus, der Ruecktausch liess die Potion damit nie fliegen (belegt im Log: der Bot
-        // hatte den Stärke-Effekt dauerhaft nicht).
-        session.pendingSplashRestore = true;
-        session.splashPotionSlot = slot;
-        session.splashHeldSlot = held;
-        session.splashSavedHeld = savedHeld;
+        if (!useItemOnceFromSlot(server, session, bot, slot)) return;
         session.lastSplashBuffTick = session.tick;
         TrainingLog.event("SPLASH_BUFF bot=" + session.botName + " potion=" + want
-                + " slot=" + slot + " held=" + held);
+                + " slot=" + slot);
     }
 
     /**
@@ -1315,7 +1457,7 @@ final class TrainingController {
      */
     private static void trySplashDamage(MinecraftServer server, Session session,
                                         ServerPlayerEntity bot, ServerPlayerEntity target) {
-        if (session.pendingSplashRestore) {
+        if (session.itemLease != null) {
             return;
         }
         if (session.tick - session.lastSplashDamageTick < SPLASH_DAMAGE_COOLDOWN_TICKS) {
@@ -1329,23 +1471,10 @@ final class TrainingController {
         if (slot < 0) {
             return;
         }
-        int held = bot.getInventory().getSelectedSlot();
-        if (held == slot) {
-            return; // Potion liegt schon in der Hand
-        }
-        ItemStack savedHeld = bot.getInventory().getStack(held).copy();
-        ItemStack potion = bot.getInventory().getStack(slot).copy();
-        bot.getInventory().setStack(slot, ItemStack.EMPTY);
-        bot.getInventory().setStack(held, potion);
         // Auf die Füße des Ziels zielen: die Splash-Explosion trifft alles im Radius darum.
         HeroBotAdapter.lookAtPositionNow(server, session.botName,
                 new Vec3d(target.getX(), target.getY() + 0.1, target.getZ()));
-        HeroBotAdapter.useOnce(server, session.botName);
-        // Ruecktausch erst im Folgetick, sonst fliegt die Potion nie (siehe trySplashBuff).
-        session.pendingSplashRestore = true;
-        session.splashPotionSlot = slot;
-        session.splashHeldSlot = held;
-        session.splashSavedHeld = savedHeld;
+        if (!useItemOnceFromSlot(server, session, bot, slot)) return;
         session.lastSplashDamageTick = session.tick;
         TrainingLog.event("SPLASH_DAMAGE bot=" + session.botName + " target=" + session.targetName
                 + " slot=" + slot + " distance=" + String.format(Locale.ROOT, "%.2f", distance));
@@ -1384,27 +1513,15 @@ final class TrainingController {
             return;
         }
 
-        int pearlSlot = -1;
-        for (int slot = 0; slot < 9; slot++) {
-            if (bot.getInventory().getStack(slot).isOf(Items.ENDER_PEARL)) {
-                pearlSlot = slot;
-                break;
-            }
-        }
+        int pearlSlot = findInventorySlot(bot, stack -> stack.isOf(Items.ENDER_PEARL));
         if (pearlSlot < 0) {
             return;
         }
 
-        int previousSlot = bot.getInventory().getSelectedSlot();
         execute(server, "player " + session.botName + " look upon " + session.targetName);
-        execute(server, "player " + session.botName + " hotbar " + (pearlSlot + 1));
-        execute(server, "player " + session.botName + " use once");
+        if (!useItemOnceFromSlot(server, session, bot, pearlSlot)) return;
         // Wiki: itemCd reset hebt die Abklingzeit sofort auf — der Bot kann sofort wieder werfen.
         HeroBotAdapter.resetItemCooldown(server, session.botName, "ender_pearl");
-        // Slot-Rueckwechsel erst im Folgetick: HeroBot wertet "use once" erst dort aus.
-        if (previousSlot != pearlSlot) {
-            session.pendingHotbarRestore = previousSlot;
-        }
         session.lastPearlTick = session.tick;
         TrainingLog.event("PEARL bot=" + session.botName + " target=" + session.targetName
                 + " distance=" + String.format(Locale.ROOT, "%.2f", bot.distanceTo(target)));
@@ -1425,17 +1542,16 @@ final class TrainingController {
                 || !bot.getOffHandStack().isOf(Items.TOTEM_OF_UNDYING)
                 || session.retreating || session.healing
                 || session.pendingCritAttackTick != NO_PENDING_CRIT
-                || session.pendingHotbarRestore >= 0 || session.pendingSplashRestore
-                || session.pendingRestoreSlotA >= 0 || session.pendingRestoreSlotB >= 0
+                || session.itemLease != null
                 || session.tick - session.lastCrystalTick < CRYSTAL_COOLDOWN_TICKS) {
             return;
         }
 
-        int crystalSlot = findHotbarSlot(bot, Items.END_CRYSTAL);
+        int crystalSlot = findInventorySlot(bot, stack -> stack.isOf(Items.END_CRYSTAL));
         if (crystalSlot < 0) {
             return;
         }
-        int obsidianSlot = findHotbarSlot(bot, Items.OBSIDIAN);
+        int obsidianSlot = findInventorySlot(bot, stack -> stack.isOf(Items.OBSIDIAN));
         BlockPos base = findCrystalBase(bot, target, obsidianSlot);
         if (base == null) {
             return;
@@ -1443,6 +1559,10 @@ final class TrainingController {
 
         session.crystalBase = new Vec3d(base.getX(), base.getY(), base.getZ());
         session.crystalReturnSlot = bot.getInventory().getSelectedSlot();
+        session.crystalDtap = target.hurtTime > 0
+                && (target.getVelocity().x * target.getVelocity().x
+                + target.getVelocity().z * target.getVelocity().z > 0.0025
+                || session.tick - session.lastTargetHitTick <= DECISION_INTERVAL_TICKS);
         session.lastCrystalTick = session.tick;
         session.crystalNextTick = session.tick + 1;
 
@@ -1450,10 +1570,12 @@ final class TrainingController {
         if (isCrystalBaseAt(bot, session.crystalBase)) {
             session.crystalPhase = CrystalPhase.OBIS_PLACED;
         } else {
-            HeroBotAdapter.selectHotbar(server, session.botName, obsidianSlot);
             Vec3d supportTop = new Vec3d(base.getX() + 0.5, base.getY(), base.getZ() + 0.5);
             HeroBotAdapter.lookAtPosition(server, session.botName, supportTop, 1);
-            HeroBotAdapter.useOnce(server, session.botName);
+            if (!useItemOnceFromSlot(server, session, bot, obsidianSlot)) {
+                session.crystalPhase = CrystalPhase.IDLE;
+                return;
+            }
             session.crystalPhase = CrystalPhase.OBIS_PLACED;
             session.crystalNextTick = session.tick + 2; // Platzierung muss durch sein
             TrainingLog.event("CRYSTAL_OBI_PLACE bot=" + session.botName + " confirmed=false");
@@ -1462,8 +1584,9 @@ final class TrainingController {
 
     private static BlockPos findCrystalBase(ServerPlayerEntity bot, ServerPlayerEntity target,
                                             int obsidianSlot) {
-        Vec3d offset = new Vec3d(target.getX() - bot.getX(), 0.0,
-                target.getZ() - bot.getZ());
+        Vec3d targetMotion = target.hurtTime > 0 ? target.getVelocity().multiply(2.0) : Vec3d.ZERO;
+        Vec3d offset = new Vec3d(target.getX() + targetMotion.x - bot.getX(), 0.0,
+                target.getZ() + targetMotion.z - bot.getZ());
         double distance = offset.length();
         if (distance < 1.0E-4) {
             return null;
@@ -1582,16 +1705,19 @@ final class TrainingController {
                     session.crystalPhase = CrystalPhase.IDLE;
                     return;
                 }
-                int crystalSlot = findHotbarSlot(bot, Items.END_CRYSTAL);
+                int crystalSlot = findInventorySlot(bot, stack -> stack.isOf(Items.END_CRYSTAL));
                 if (crystalSlot < 0) {
                     restoreCrystalSlot(server, session, bot);
                     session.crystalPhase = CrystalPhase.IDLE;
                     return;
                 }
-                HeroBotAdapter.selectHotbar(server, session.botName, crystalSlot);
                 HeroBotAdapter.lookAtPosition(server, session.botName,
                         new Vec3d(base.getX() + 0.5, base.getY() + 1.0, base.getZ() + 0.5), 1);
-                HeroBotAdapter.useOnce(server, session.botName);
+                if (!useItemOnceFromSlot(server, session, bot, crystalSlot)) {
+                    restoreCrystalSlot(server, session, bot);
+                    session.crystalPhase = CrystalPhase.IDLE;
+                    return;
+                }
                 session.crystalPhase = CrystalPhase.CRYSTAL_PLACED;
                 session.crystalNextTick = session.tick + 2;
                 TrainingLog.event("CRYSTAL_ITEM_USE bot=" + session.botName + " confirmed=false");
@@ -1624,10 +1750,72 @@ final class TrainingController {
                 HeroBotAdapter.lookAtPosition(server, session.botName, center, 1);
                 HeroBotAdapter.attackOnce(server, session.botName);
                 restoreCrystalSlot(server, session, bot);
-                session.crystalPhase = CrystalPhase.DONE;
-                session.crystalNextTick = session.tick + 1;
                 TrainingLog.event("CRYSTAL_DETONATE bot=" + session.botName + " target=" + session.targetName
                         + " distance=" + String.format(Locale.ROOT, "%.2f", bot.distanceTo(target)));
+                if (session.crystalDtap) {
+                    session.crystalPhase = CrystalPhase.D_TAP_WAIT_SECOND;
+                    session.crystalDtapDeadline = session.tick + 24;
+                    session.crystalNextTick = session.tick + 1;
+                } else {
+                    session.crystalPhase = CrystalPhase.DONE;
+                    session.crystalNextTick = session.tick + 1;
+                }
+            }
+            case D_TAP_WAIT_SECOND -> {
+                BlockPos base = BlockPos.ofFloored(ground);
+                Vec3d center = new Vec3d(base.getX() + 0.5, base.getY() + 1.0, base.getZ() + 0.5);
+                double botDistance = new Vec3d(bot.getX(), bot.getY(), bot.getZ()).distanceTo(center);
+                double targetDistance = new Vec3d(target.getX(), target.getY(), target.getZ()).distanceTo(center);
+                if (session.tick > session.crystalDtapDeadline || target.getHealth() <= 0.0F
+                        || !bot.getOffHandStack().isOf(Items.TOTEM_OF_UNDYING)
+                        || bot.getHealth() < CRYSTAL_MIN_HEALTH || !isCrystalBaseAt(bot, ground)
+                        || botDistance > 4.5 || targetDistance > 5.5
+                        || targetDistance + 0.35 >= botDistance) {
+                    session.crystalPhase = CrystalPhase.DONE;
+                    session.crystalNextTick = session.tick + 1;
+                    TrainingLog.event("CRYSTAL_DTAP_ABORT bot=" + session.botName + " reason=safety_or_timeout");
+                    return;
+                }
+                if (target.hurtTime > 0) return; // wait until the first hit window closes
+                if (!isCrystalSpaceClear(bot, target, base) || hasCrystalAt(bot, base)) {
+                    session.crystalPhase = CrystalPhase.DONE;
+                    session.crystalNextTick = session.tick + 1;
+                    TrainingLog.event("CRYSTAL_DTAP_ABORT bot=" + session.botName + " reason=space_blocked");
+                    return;
+                }
+                int crystalSlot = findInventorySlot(bot, stack -> stack.isOf(Items.END_CRYSTAL));
+                if (crystalSlot < 0) {
+                    session.crystalPhase = CrystalPhase.DONE;
+                    session.crystalNextTick = session.tick + 1;
+                    return;
+                }
+                HeroBotAdapter.lookAtPosition(server, session.botName, center, 1);
+                if (!useItemOnceFromSlot(server, session, bot, crystalSlot)) {
+                    session.crystalPhase = CrystalPhase.DONE;
+                    session.crystalNextTick = session.tick + 1;
+                    return;
+                }
+                session.crystalPhase = CrystalPhase.D_TAP_CRYSTAL_PLACED;
+                session.crystalNextTick = session.tick + 2;
+            }
+            case D_TAP_CRYSTAL_PLACED -> {
+                BlockPos base = BlockPos.ofFloored(ground);
+                Vec3d center = new Vec3d(base.getX() + 0.5, base.getY() + 1.0, base.getZ() + 0.5);
+                double botDistance = new Vec3d(bot.getX(), bot.getY(), bot.getZ()).distanceTo(center);
+                double targetDistance = new Vec3d(target.getX(), target.getY(), target.getZ()).distanceTo(center);
+                if (!hasCrystalAt(bot, base) || !bot.getOffHandStack().isOf(Items.TOTEM_OF_UNDYING)
+                        || bot.getHealth() < CRYSTAL_MIN_HEALTH || targetDistance + 0.35 >= botDistance) {
+                    session.crystalPhase = CrystalPhase.DONE;
+                    session.crystalNextTick = session.tick + 1;
+                    TrainingLog.event("CRYSTAL_DTAP_ABORT bot=" + session.botName + " reason=second_blast_risk");
+                    return;
+                }
+                HeroBotAdapter.lookAtPosition(server, session.botName, center, 1);
+                HeroBotAdapter.attackOnce(server, session.botName);
+                restoreCrystalSlot(server, session, bot);
+                session.crystalPhase = CrystalPhase.DONE;
+                session.crystalNextTick = session.tick + 1;
+                TrainingLog.event("CRYSTAL_DTAP bot=" + session.botName + " target=" + session.targetName);
             }
             default -> session.crystalPhase = CrystalPhase.IDLE;
         }
@@ -1648,35 +1836,9 @@ final class TrainingController {
      */
     private static void applyPendingRestores(MinecraftServer server, Session session,
                                              ServerPlayerEntity bot) {
-        if (session.pendingSplashRestore) {
-            session.pendingSplashRestore = false;
-            // Was nach dem Wurf noch in der Hand liegt (leer, wenn die Potion geflogen ist),
-            // geht zurueck in den Ursprungsslot; die alte Hand kommt wieder rein.
-            if (session.splashPotionSlot >= 0 && session.splashHeldSlot >= 0) {
-                ItemStack remaining = bot.getInventory().getStack(session.splashHeldSlot).copy();
-                bot.getInventory().setStack(session.splashPotionSlot, remaining);
-                bot.getInventory().setStack(session.splashHeldSlot, session.splashSavedHeld);
-            }
-            session.splashPotionSlot = -1;
-            session.splashHeldSlot = -1;
-            session.splashSavedHeld = null;
-        }
-        if (session.pendingRestoreSlotA >= 0) {
-            bot.getInventory().setStack(session.pendingRestoreSlotA, session.pendingRestoreStackA);
-            session.pendingRestoreSlotA = -1;
-            session.pendingRestoreStackA = null;
-        }
-        if (session.pendingRestoreSlotB >= 0) {
-            bot.getInventory().setStack(session.pendingRestoreSlotB, session.pendingRestoreStackB);
-            session.pendingRestoreSlotB = -1;
-            session.pendingRestoreStackB = null;
-        }
-        if (session.pendingHotbarRestore >= 0) {
-            int wanted = findCombatSlot(bot, session.pendingHotbarRestore);
-            session.pendingHotbarRestore = -1;
-            if (bot.getInventory().getSelectedSlot() != wanted) {
-                HeroBotAdapter.selectHotbar(server, session.botName, wanted);
-            }
+        if (session.itemLease != null && session.itemLeaseRestoreTick != Long.MAX_VALUE
+                && session.tick >= session.itemLeaseRestoreTick) {
+            restoreItemLease(server, session, bot);
         }
     }
 
@@ -1802,6 +1964,10 @@ final class TrainingController {
 
     private static boolean startHealing(MinecraftServer server, Session session, ServerPlayerEntity bot) {
         cancelRangedCombat(server, session, "healing");
+        if (session.totemDoubleHandLease) {
+            restoreItemLease(server, session, bot);
+            session.totemDoubleHandLease = false;
+        }
         int appleSlot = -1;
         for (int slot = 0; slot < 36; slot++) {
             if (bot.getInventory().getStack(slot).isOf(Items.GOLDEN_APPLE)
@@ -1813,15 +1979,11 @@ final class TrainingController {
         if (appleSlot < 0) {
             return false;
         }
-        if (appleSlot >= 9) {
-            ItemStack apple = bot.getInventory().getStack(appleSlot).copy();
-            ItemStack displaced = bot.getInventory().getStack(2).copy();
-            bot.getInventory().setStack(appleSlot, displaced);
-            bot.getInventory().setStack(2, apple);
-            appleSlot = 2;
-        }
-
-        session.healReturnSlot = bot.getInventory().getSelectedSlot();
+        ItemLease lease = equipItemAtSlot(server, session, bot, appleSlot);
+        if (lease == null) return false;
+        session.itemLeaseRestoreTick = Long.MAX_VALUE;
+        appleSlot = lease.hotbarSlot();
+        session.healReturnSlot = lease.previousSelectedSlot();
         session.healing = true;
         session.healingUntilTick = session.tick + HEAL_DURATION_TICKS;
         session.lastHealTick = session.tick;
@@ -1853,15 +2015,11 @@ final class TrainingController {
         if (foodSlot < 0) {
             return false;
         }
-        if (foodSlot >= 9) {
-            ItemStack food = bot.getInventory().getStack(foodSlot).copy();
-            ItemStack displaced = bot.getInventory().getStack(2).copy();
-            bot.getInventory().setStack(foodSlot, displaced);
-            bot.getInventory().setStack(2, food);
-            foodSlot = 2;
-        }
-
-        session.healReturnSlot = bot.getInventory().getSelectedSlot();
+        ItemLease lease = equipItemAtSlot(server, session, bot, foodSlot);
+        if (lease == null) return false;
+        session.itemLeaseRestoreTick = Long.MAX_VALUE;
+        foodSlot = lease.hotbarSlot();
+        session.healReturnSlot = lease.previousSelectedSlot();
         session.healing = true;
         session.healingUntilTick = session.tick + EAT_DURATION_TICKS;
         session.lastEatTick = session.tick;
@@ -1891,9 +2049,9 @@ final class TrainingController {
         return entity.isUsingItem() && entity.getActiveItem().isOf(Items.SHIELD);
     }
 
-    /** True when an axe sits in the first nine inventory slots. */
+    /** True when an axe is available anywhere in the main inventory. */
     private static boolean hasAxe(ServerPlayerEntity player) {
-        for (int slot = 0; slot < 9; slot++) {
+        for (int slot = 0; slot < 36; slot++) {
             if (itemPath(player.getInventory().getStack(slot)).endsWith("_axe")) {
                 return true;
             }
@@ -1903,7 +2061,38 @@ final class TrainingController {
 
     private static String humanState(Session session, ServerPlayerEntity bot, ServerPlayerEntity target) {
         return session.policy.observe(bot.distanceTo(target), target.getHealth(), bot.getHealth(),
-                bot.isOnGround(), isBlocking(bot), hasAxe(target));
+                weaponClass(target.getMainHandStack()), target.isOnGround(), bot.isOnGround(),
+                isBlocking(bot), hasAxe(target), target.canSee(bot), isFacing(bot, target),
+                true, target.isGliding());
+    }
+
+    private static String combatState(Session session, ServerPlayerEntity bot, ServerPlayerEntity target) {
+        int cooldown = weaponCooldownTicks(bot);
+        boolean attackReady = session.lastManualAttackTick <= 0
+                || session.tick - session.lastManualAttackTick >= cooldown;
+        return session.policy.observe(bot.distanceTo(target), bot.getHealth(), target.getHealth(),
+                weaponClass(bot.getMainHandStack()), bot.isOnGround(), target.isOnGround(),
+                isBlocking(target), hasAxe(bot), bot.canSee(target), isFacing(target, bot),
+                attackReady, bot.isGliding());
+    }
+
+    private static String weaponClass(ItemStack stack) {
+        String path = itemPath(stack);
+        if (path.endsWith("_sword")) return "sword";
+        if (path.endsWith("_axe")) return "axe";
+        if (path.endsWith("_spear")) return "spear";
+        if (path.equals("mace")) return "mace";
+        if (path.equals("trident")) return "trident";
+        if (path.equals("bow")) return "bow";
+        if (path.equals("crossbow")) return "crossbow";
+        return "other";
+    }
+
+    private static boolean isFacing(ServerPlayerEntity viewer, ServerPlayerEntity other) {
+        Vec3d toward = new Vec3d(other.getX() - viewer.getX(), 0.0, other.getZ() - viewer.getZ()).normalize();
+        Vec3d facing = viewer.getRotationVec(1.0F);
+        facing = new Vec3d(facing.x, 0.0, facing.z).normalize();
+        return toward.lengthSquared() > 0.0 && facing.dotProduct(toward) >= 0.45;
     }
 
     /**
@@ -1972,6 +2161,7 @@ final class TrainingController {
     private static void finishHealing(MinecraftServer server, Session session, ServerPlayerEntity bot) {
         execute(server, "player " + session.botName + " use");
         HeroBotAdapter.stopMovement(server, session.botName);
+        restoreItemLease(server, session, bot);
         int returnSlot = findCombatSlot(bot, session.healReturnSlot);
         execute(server, "player " + session.botName + " hotbar " + (returnSlot + 1));
         // Siehe Start: kein attack continuous — der Angriff kommt aus tryCritMelee.
@@ -2004,6 +2194,14 @@ final class TrainingController {
         }
         execute(session.server, "player " + session.botName + " stop");
         execute(session.server, "player " + session.botName + " autojump false");
+        if (session.pathing) {
+            HeroBotAdapter.stopPathing(session.server, session.botName);
+            session.pathing = false;
+        }
+        if (session.itemLease != null) {
+            restoreItemLease(session.server, session, HeroBotAdapter.findPlayer(session.server, session.botName));
+        }
+        HeroBotAdapter.restoreCombatSettings(session.server, session.previousCombatSettings);
         if (removeBot) {
             execute(session.server, "player " + session.botName + " disconnect");
         }
@@ -2067,6 +2265,14 @@ final class TrainingController {
         private final String targetName;
         private final QLearningPolicy policy;
         private final PvPKit kit;
+        private final HeroBotAdapter.CombatSettingsSnapshot previousCombatSettings;
+        private ItemLease itemLease;
+        private long itemLeaseRestoreTick = NO_PENDING_CRIT;
+        private boolean pathing;
+        private final boolean nativePathSupported;
+        private Vec3d lastPathProgressPosition;
+        private int stuckChecks;
+        private long lastPathCommandTick = Long.MIN_VALUE / 2;
         private long tick;
         private long decisions;
         private long lastPearlTick = -PEARL_COOLDOWN_TICKS;
@@ -2077,6 +2283,7 @@ final class TrainingController {
         private int healReturnSlot;
         private boolean healing;
         private boolean shielding;
+        private boolean totemDoubleHandLease;
         private boolean maceLoadout;
         private MacePhase macePhase = MacePhase.DONE;
         private int macePhaseTicks;
@@ -2095,23 +2302,10 @@ final class TrainingController {
         private CrystalPhase crystalPhase = CrystalPhase.IDLE;
         /** Tick, ab dem die naechste Crystal-Phase laeuft (Aktionen muessen auseinanderliegen). */
         private long crystalNextTick;
+        private long crystalDtapDeadline;
+        private boolean crystalDtap;
         private Vec3d crystalBase;
         private int crystalReturnSlot = -1;
-        /**
-         * Slot-Restauration auf den Folgetick. HeroBot wertet Befehle erst im naechsten Tick
-         * aus: wer im selben Tick zuruecktauscht, verhindert, dass die Aktion ueberhaupt wirkt
-         * (belegt: CRYSTAL_OBI_PLACE confirmed=false, Splash-Potion nie geworfen).
-         */
-        private int pendingRestoreSlotA = -1;
-        private ItemStack pendingRestoreStackA;
-        private int pendingRestoreSlotB = -1;
-        private ItemStack pendingRestoreStackB;
-        private int pendingHotbarRestore = -1;
-        /** Splash-Potion: Ruecktausch von Potion und alter Hand erst im Folgetick. */
-        private boolean pendingSplashRestore;
-        private int splashPotionSlot = -1;
-        private int splashHeldSlot = -1;
-        private ItemStack splashSavedHeld;
         private long pendingCritAttackTick = NO_PENDING_CRIT;
         private long lastWindChargeTick = Long.MIN_VALUE / 2;
         private long lastSplashBuffTick = Long.MIN_VALUE / 2;
@@ -2134,17 +2328,24 @@ final class TrainingController {
         private float lastTargetHealth;
 
         private Session(MinecraftServer server, String botName, String targetName,
-                        QLearningPolicy policy, PvPKit kit) {
+                        QLearningPolicy policy, PvPKit kit,
+                        HeroBotAdapter.CombatSettingsSnapshot previousCombatSettings) {
             this.server = server;
             this.botName = botName;
             this.targetName = targetName;
             this.policy = policy;
             this.kit = kit;
+            this.previousCombatSettings = previousCombatSettings;
+            this.nativePathSupported = HeroBotAdapter.supportsPathing(server);
             ServerPlayerEntity bot = server.getPlayerManager().getPlayer(botName);
             ServerPlayerEntity target = server.getPlayerManager().getPlayer(targetName);
             this.lastBotHealth = bot == null ? 20.0F : bot.getHealth();
             this.lastTargetHealth = target == null ? 20.0F : target.getHealth();
         }
+    }
+
+    private record ItemLease(int sourceSlot, int hotbarSlot, int previousSelectedSlot,
+                             boolean movedFromInventory, ItemStack displacedStack) {
     }
 
     private enum MacePhase {
@@ -2166,6 +2367,8 @@ final class TrainingController {
         OBIS_PLACED,
         /** Crystal wurde gesetzt; naechster Tick zundet. */
         CRYSTAL_PLACED,
+        D_TAP_WAIT_SECOND,
+        D_TAP_CRYSTAL_PLACED,
         DONE
     }
 

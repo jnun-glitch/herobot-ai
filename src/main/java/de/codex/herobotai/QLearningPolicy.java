@@ -29,22 +29,32 @@ final class QLearningPolicy {
     private static final double EXPLORATION_START = 0.18;
     private static final double EXPLORATION_MIN = 0.03;
     private static final double EXPLORATION_DECAY_UPDATES = 1500.0;
+    private static final String MODEL_VERSION = "2";
     private final Map<String, double[]> values = new HashMap<>();
+    private final String kitName;
     private long updates;
 
-    QLearningPolicy() {
+    QLearningPolicy(PvPKit kit) {
+        this.kitName = kit.commandName();
         load();
     }
 
     String observe(double distance, float botHealth, float targetHealth,
-                   boolean targetOnGround, boolean targetBlocking, boolean axeAvailable) {
+                   String weaponClass, boolean botOnGround, boolean targetOnGround,
+                   boolean targetBlocking, boolean axeAvailable, boolean canSeeTarget,
+                   boolean targetFacingBot, boolean attackReady, boolean gliding) {
         int distanceBucket = distance < 2.2 ? 0 : distance < 4.0 ? 1 : distance < 8.0 ? 2 : 3;
         float healthDifference = botHealth - targetHealth;
         int healthBucket = healthDifference < -3.0 ? 0 : healthDifference > 3.0 ? 2 : 1;
         int ownHealthBucket = botHealth <= 8.0F ? 0 : botHealth <= 16.0F ? 1 : 2;
-        return "d" + distanceBucket + "_h" + healthBucket + "_air" + (targetOnGround ? 0 : 1)
+        String normalizedWeapon = weaponClass == null ? "other" : weaponClass.replaceAll("[^a-z0-9]", "");
+        if (normalizedWeapon.isEmpty()) normalizedWeapon = "other";
+        return "v2_k" + kitName + "_d" + distanceBucket + "_h" + healthBucket
+                + "_selfair" + (botOnGround ? 0 : 1) + "_targetair" + (targetOnGround ? 0 : 1)
                 + "_b" + (targetBlocking ? 1 : 0) + "_o" + ownHealthBucket
-                + "_x" + (axeAvailable ? 1 : 0);
+                + "_x" + (axeAvailable ? 1 : 0) + "_w" + normalizedWeapon
+                + "_see" + (canSeeTarget ? 1 : 0) + "_face" + (targetFacingBot ? 1 : 0)
+                + "_ready" + (attackReady ? 1 : 0) + "_glide" + (gliding ? 1 : 0);
     }
 
     Action choose(String state) {
@@ -103,6 +113,8 @@ final class QLearningPolicy {
 
     void save() {
         Properties properties = new Properties();
+        properties.setProperty("version", MODEL_VERSION);
+        properties.setProperty("kit", kitName);
         properties.setProperty("updates", Long.toString(updates));
         values.forEach((state, q) -> {
             for (Action action : Action.values()) {
@@ -137,6 +149,11 @@ final class QLearningPolicy {
         Properties properties = new Properties();
         try (Reader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
             properties.load(reader);
+            if (!MODEL_VERSION.equals(properties.getProperty("version"))
+                    || !kitName.equals(properties.getProperty("kit"))) {
+                HeroBotAiCommon.LOGGER.warn("Skipping incompatible Q-learning model for kit {} at {}", kitName, file);
+                return;
+            }
             updates = Math.max(0L, Long.parseLong(properties.getProperty("updates", "0")));
             for (String key : properties.stringPropertyNames()) {
                 if (!key.startsWith("q.")) {
@@ -166,7 +183,8 @@ final class QLearningPolicy {
         return values.computeIfAbsent(state, ignored -> new double[Action.values().length]);
     }
 
-    private static Path getPath() {
-        return FabricLoader.getInstance().getConfigDir().resolve("herobot-ai-training").resolve("qtable.properties");
+    private Path getPath() {
+        return FabricLoader.getInstance().getConfigDir().resolve("herobot-ai-training")
+                .resolve("qtable-v2-" + kitName + ".properties");
     }
 }

@@ -114,10 +114,57 @@ final class HeroBotAdapter {
         run(server, "player " + bot + " itemCd " + itemId + " reset");
     }
 
-    /** Kampf-Einstellungen, die Wiki-typisch einmalig gesetzt werden. */
-    static void applyCombatSettings(MinecraftServer server) {
+    /** Sichert die aktuellen Serverwerte und setzt die Trainingswerte temporär. */
+    static CombatSettingsSnapshot applyCombatSettings(MinecraftServer server) {
+        CombatSettingsSnapshot previous = readCombatSettings();
+        if (previous == null) {
+            HeroBotAiCommon.LOGGER.warn("HeroBot-Kampfeinstellungen konnten nicht gesichert werden; lasse sie unverändert.");
+            TrainingLog.error("HeroBot-Kampfeinstellungen nicht gelesen; keine globalen Werte geändert");
+            return null;
+        }
         run(server, "herobot shieldStunning true");
         run(server, "herobot noProjectileRandom true");
+        return previous;
+    }
+
+    /** Stellt die Einstellungen wieder her, die vor dem Trainingskampf aktiv waren. */
+    static void restoreCombatSettings(MinecraftServer server, CombatSettingsSnapshot previous) {
+        if (previous == null) return;
+        run(server, "herobot shieldStunning " + previous.shieldStunning());
+        run(server, "herobot noProjectileRandom " + previous.noProjectileRandom());
+    }
+
+    private static CombatSettingsSnapshot readCombatSettings() {
+        try {
+            Class<?> settings;
+            try {
+                settings = Class.forName("hero.bane.herobot.common.rule.HeroBotSettings", false,
+                        HeroBotAdapter.class.getClassLoader());
+            } catch (ClassNotFoundException isolatedModClassLoader) {
+                settings = Class.forName("hero.bane.herobot.common.rule.HeroBotSettings", false,
+                        Thread.currentThread().getContextClassLoader());
+            }
+            boolean shieldStunning = settings.getField("shieldStunning").getBoolean(null);
+            boolean noProjectileRandom = settings.getField("noProjectileRandom").getBoolean(null);
+            return new CombatSettingsSnapshot(shieldStunning, noProjectileRandom);
+        } catch (ReflectiveOperationException | LinkageError exception) {
+            HeroBotAiCommon.LOGGER.error("Could not read current HeroBot combat settings", exception);
+            TrainingLog.error("Could not read HeroBot combat settings: " + exception);
+            return null;
+        }
+    }
+
+    static boolean supportsPathing(MinecraftServer server) {
+        var playerCommand = server.getCommandManager().getDispatcher().getRoot().getChild("player");
+        return playerCommand != null && playerCommand.getChild("path") != null;
+    }
+
+    static void pathToEntity(MinecraftServer server, String bot, String target) {
+        run(server, "player " + bot + " path entity " + target);
+    }
+
+    static void stopPathing(MinecraftServer server, String bot) {
+        run(server, "player " + bot + " path stop");
     }
 
     /** Nutzt den Gegenstand im gewaehlten Slot einmal. */
@@ -201,5 +248,8 @@ final class HeroBotAdapter {
 
     private static String coord(double value) {
         return String.format(Locale.ROOT, "%.3f", value);
+    }
+
+    record CombatSettingsSnapshot(boolean shieldStunning, boolean noProjectileRandom) {
     }
 }

@@ -23,11 +23,11 @@ Die Mod nutzt HeroBots dokumentierte Befehle `/playerspawn` und `/player`. HeroB
 
 Ohne Kit kopiert der Bot Inventar, Rüstung, Offhand und Hotbar-Auswahl des Gegners. Er kopiert ausdrücklich nicht dessen Action-Pack oder Tasteneingaben. In einem Duell steuert ausschließlich der Kampfcontroller Bot-Aktionen; er verfolgt den Gegner, greift an, springt bei Bedarf und lernt seine Bewegungswahl anhand von Abstand, Lebenspunkten, ob das Ziel blockt, eigener Waffe und ausgeteiltem/eingestecktem Schaden.
 
-Der Bot lernt zusätzlich aus deinem Spiel: Aus deiner Bewegung im Kampf wird abgeleitet, welche Aktion du ausgeführt hast (Annäherung, Seitwärts, Rückzug, Halten), und in dieselbe Q-Tabelle geschrieben — aber nur mit positiven Belohnungen: Schaden, den du dem Bot machst, und +12 für deinen Sieg. Deine Fehler werden nie bestraft. Die Erkundungsrate sinkt mit der Zeit von 0,18 auf 0,03, damit der Bot gelerntes statt Zufall anwendet.
+Der Bot lernt zusätzlich aus deinem Spiel: Aus deiner Bewegung im Kampf wird abgeleitet, welche Aktion du ausgeführt hast (Annäherung, Seitwärts, Rückzug, Halten), und in die Q-Tabelle des gewählten Kits geschrieben — aber nur mit positiven Belohnungen: Schaden, den du dem Bot machst, und +12 für deinen Sieg. Deine Fehler werden nie bestraft. Der Zustand berücksichtigt Abstand, Lebenspunkte, Waffenklasse, Boden/Luft, Blocken, Axtverfügbarkeit, Sichtlinie, Blickrichtung, Angriffscooldown und Elytra-Gleitflug. Jedes Kit lernt separat. Die Erkundungsrate sinkt mit der Zeit von 0,18 auf 0,03, damit der Bot gelerntes statt Zufall anwendet.
 
 `/hba kit` zeigt die verfügbaren Preset-Kits. `/hba kit <Kit>` gibt dir das gewählte Kit direkt, ohne einen Bot zu spawnen. Optional kann ein Spielername als Ziel angegeben werden: `/hba kit <Kit> <Spielername>`; die umgekehrte Reihenfolge wird ebenfalls akzeptiert. Das Kit ersetzt das bisherige Inventar des Empfängers. Die Waffe liegt danach im ersten Hotbar-Slot.
 
-Im direkten Duell verfolgt der Bot Ziele, die weiter als 2,45 Blöcke entfernt sind, richtet den Blick direkt auf das Ziel und führt zeitlich gesteuerte Einzelschläge aus. Bei einem Gegner im Kreativmodus zeigt der Start einen Hinweis, weil dieser keinen normalen Kampfschaden nimmt. Die Kampfdaten protokollieren erkannte Bot- und Zielschäden getrennt.
+Im direkten Duell verfolgt der Bot Ziele, die weiter als 2,45 Blöcke entfernt sind, richtet den Blick direkt auf das Ziel und führt zeitlich gesteuerte Einzelschläge aus. Wenn die installierte HeroBot-Version `player <Bot> path entity <Ziel>` anbietet, verwendet er diesen Wegfinder bei Hindernissen und versucht festgefahrene Pfade erneut; ohne den Befehl bleibt die bisherige Bewegungssteuerung aktiv. Bei einem Gegner im Kreativmodus zeigt der Start einen Hinweis, weil dieser keinen normalen Kampfschaden nimmt. Die Kampfdaten protokollieren erkannte Bot- und Zielschäden getrennt.
 
 HeroBot kann den Fake-Spieler erst nach einer asynchronen Profilabfrage in die Spielerliste übernehmen. Die Mod wartet deshalb bis zu 20 Sekunden auf den Beitritt und startet Ausrüstung sowie KI erst danach. `/hba status` zeigt währenddessen den Spawn-Fortschritt; `/hba stop` oder `/hba remove` bricht die Anfrage ab und entfernt einen verspätet beitretenden Bot. Botnamen müssen 3–16 Buchstaben, Zahlen oder Unterstriche enthalten.
 
@@ -44,18 +44,19 @@ Die Arena wurde entfernt. `/hba arena` und `config/herobot-pvp-bot.json` existie
 - `/hba kits` — Kits anzeigen.
 - `/hba help` — Befehlsübersicht.
 
-Im Nahkampf greift er waffenabhaengig zum richtigen Moment an (Schwert ab 11, Axt ab 17 Ticks) und springt auf 2,5 Bloecke fast vor jedem Schlag. Der Angriff erfolgt in der fallenden Phase und wird als Crit-Absicht protokolliert (`crit_intent=true`); ob Minecraft alle Crit-Bedingungen erfuellt, muss im Spiel beobachtet werden. Nach jedem Treffer setzt er den Sprint kurz ab (`wtap=true`). Das Q-Learning-Modell entscheidet die Nahkampfbewegung selbst; sein Zustand beschreibt Abstand, HP-Veraeltnis, Luftstatus, ob das Ziel blockt, die eigenen HP und ob eine Axt verfuegbar ist.
+Im Nahkampf greift er waffenabhaengig zum richtigen Moment an (Schwert ab 11, Axt ab 17 Ticks) und springt auf 2,5 Bloecke fast vor jedem Schlag. Der Angriff erfolgt in der fallenden Phase und wird als Crit-Absicht protokolliert (`crit_intent=true`); ob Minecraft alle Crit-Bedingungen erfuellt, muss im Spiel beobachtet werden. Nach jedem Treffer setzt er den Sprint kurz ab (`wtap=true`). Das Q-Learning-Modell entscheidet die Nahkampfbewegung selbst; sein Zustand umfasst Waffenklasse, Abstand, Lebenspunkte, Boden-/Luftstatus, Blocken, Axtverfügbarkeit, Sichtlinie, Blickrichtung, Angriffscooldown und Elytra-Gleitflug.
 
 Ein Elytra-Mace-Manöver startet automatisch, sobald der Bot tatsächlich eine angelegte Elytra, eine Mace und Feuerwerksraketen im Inventar hat – also auch bei einem kopierten Inventar. Bei freiem Höhenkorridor steigt der Bot für einen Gleitflug auf, nutzt bis zu zwei Raketen und richtet anschließend einen Sturzangriff auf das Ziel. Nach dem Manöver übernimmt derselbe gemeinsame Kampfcontroller. Bei zu wenig freier Höhe überspringt er den Flug und kämpft am Boden. Das Manöver funktioniert im direkten Duell `/hba spawn ...`.
 
 ### Item-Nutzung und Slot-Wechsel
 
-Der Bot wechselt aktiv zwischen seinen Hotbar-Slots und nutzt die mitgeführten Items situationsabhängig:
+Der Bot wechselt aktiv zwischen seinen Hotbar-Slots und nutzt die mitgeführten Items situationsabhängig. Bei Verbrauchs- und Fernkampfitems durchsucht die Mod alle 36 Inventarplätze. Liegt ein benötigtes Item im Rucksack, tauscht die Mod es vorübergehend mit dem ausgewählten Hotbar-Slot, lässt HeroBot die Aktion ausführen und legt den verbleibenden Stack sowie den verdrängten Gegenstand danach zurück. Dafür braucht es keinen zusätzlichen `/player`-Inventarbefehl.
 
-- **Bogen / Armbrust (Fernkampf):** Ab 8 Blöcken Abstand nimmt er zuerst eine geladene Armbrust, sonst einen Bogen mit Munition. Der Bogen wird 20 Ticks gespannt und zum Schuss freigegeben; eine ungeladene Armbrust wird geladen, getrennt abgefeuert und bei vorhandener Munition wieder geladen. Bei 5 Blöcken stoppt der Fernkampf. Ohne freie Sicht oder passende Munition schiesst er nicht.
+- **Bogen / Armbrust (Fernkampf):** Ab 8 Blöcken Abstand nimmt er zuerst eine geladene Armbrust, sonst einen Bogen mit Munition. Der Bogen wird 20 Ticks gespannt und zum Schuss freigegeben; eine ungeladene Armbrust wird geladen, getrennt abgefeuert und bei vorhandener Munition wieder geladen. Bogen und Armbrust dürfen überall im Inventar liegen. Bei 5 Blöcken stoppt der Fernkampf. Ohne freie Sicht oder passende Munition schiesst er nicht.
 - **Splash-Potions:** Ohne Stärke- oder Schnelligkeitseffekt wirft er beim Kampfbeginn die passende Splash-Potion unter seine Füße (Potion-Typ wird über die Item-Komponente erkannt).
-- **Wind Charge:** Beim Rückzug unter 4 Herzen wirft er eine Wind Charge, um per Rückstoß Abstand zu gewinnen.
-- **Axt gegen Schild und Totem in den Offhand:** wie zuvor, unverändert.
+- **Wind Charge / Enderperle:** Werden auch aus dem Rucksack geholt und nach dem Wurf samt verdrängtem Hotbar-Item zurücksortiert.
+- **Totem:** Bei einem Crystal-Kit, niedrigen Lebenspunkten oder kürzlich erlittenem Schaden bekommt ein verfügbares Totem Vorrang in der Offhand. Bei akuter Lebensgefahr kann ein zweites Totem vorübergehend in die Haupthand kommen; sobald die Gefahr sinkt, wird die vorherige Waffe zurückgelegt. Ein Reservertotem ersetzt ein verbrauchtes Offhand-Totem sofort.
+- **Schild:** Bleibt die Standard-Offhand, wenn gerade kein Totem-Schutz Vorrang hat. Gegen einen blockenden Gegner wählt der Bot die Axt, sofern verfügbar.
 
 ### Nahkampf-Taktiken (aus Wiki-Recherche, minecraft.wiki)
 
@@ -63,7 +64,7 @@ Der Bot wechselt aktiv zwischen seinen Hotbar-Slots und nutzt die mitgeführten 
 - **W-Tap (Sprint-Reset):** Sprint bleibt bis zum Bot-Tick des Schlages an. Danach setzt der Bot Sprint für 2 Ticks zurück und startet ihn für den folgenden Sprint-Knockback-Schlag erneut. Crits bleiben ein eigener Pfad, weil Sprint-Knockback in Java Vorrang vor einem Crit hat.
 - **Crit-Spam auf kurzer Distanz:** Bis 2,5 Blöcke springt er vor fast jedem Schlag und schlägt in der fallenden Phase (1,5-facher Schaden, rund 1,6 Crit/s). Auf weiterer Distanz behält er das alte Muster „alle 3 Schwünge" bei, weil der Sprungzyklus dort sonst den Angriffs-Rhythmus ausbremst.
 - **Schild-Stunning:** Blockt der Gegner, schlägt er zweimal im selben Tick zu (`attack twice`) — vorausgesetzt HeroBots `shieldStunning` ist aktiv (setzt die Mod beim Kampfstart).
-- **Crystal-PvP:** Er setzt Kristalle nur mit Totem in der Offhand und genügend Platz; die Zielposition darf weder Spieler noch andere Entitäten schneiden und muss näher am Gegner als am Bot liegen. Basis und Kristall werden in getrennten Ticks bestätigt, bevor der Bot zuschlägt.
+- **Crystal-PvP / D-Tap:** Obsidian und Endkristalle dürfen im gesamten Inventar liegen. Basis und Kristall werden in getrennten Ticks bestätigt. Der Bot setzt den Kristall nur mit Totem in der Offhand, freiem 2×2×2-Platz und einer Position, die näher am Gegner als am Bot liegt. Nach einem kürzlichen Treffer mit Rückstoß versucht er optional einen zweiten Kristall am selben Block, sobald das erste Trefferfenster vorbei ist. Bei fehlendem Platz, zu hohem Eigenrisiko oder fehlendem Totem wird abgebrochen. Die Reihenfolge orientiert sich an der [D-Tap-Anleitung](https://mctrainer.club/guides/d-tap); Totem-Prioritäten an [Totem Management](https://mctrainer.club/guides/totem-management).
 - **Enderperlen:** Nach dem Wurf setzt sie den Perlen-Cooldown sofort zurück (`itemCd reset`), kann also sofort wieder geworfen werden.
 
 ## Debugging und manuelles Feedback
@@ -75,7 +76,7 @@ Der ModMenu-Bildschirm lässt dich neun Fähigkeiten auf **Unbekannt**, **Kann**
 Lokale Dateien:
 
 - `config/herobot-ai-training/fight-data.csv` — Kampf- und Debugereignisse; rotiert ab 5 MB in eine `.1`-Datei.
-- `config/herobot-ai-training/qtable.properties` — persistente tabellarische Q-Werte.
+- `config/herobot-ai-training/qtable-v2-<kit>.properties` — persistente tabellarische Q-Werte je Kit. Die alte `qtable.properties` bleibt unangetastet.
 - `config/herobot-ai-training/training.properties` — manuelles Fähigkeitenfeedback.
 - `config/herobot-ai-training/debug.log` — Client-Diagnose und UI-Aktionen.
 
@@ -83,7 +84,7 @@ Auf einem dedizierten Server liegen Kampf-Log und Q-Modell serverseitig. Sie wer
 
 ## Grenzen
 
-Das Modell ist tabulares Q-Learning, kein neuronales Netz. Es lernt Bewegungsentscheidungen aus Kampfbelohnungen sowie — nur positiv — aus den Aktionen des menschlichen Gegners; Essen, Rückzug, Schild, Waffenwechsel und Crystal-Einsatz sind regelbasierte Zusätze. Nahkampfangriffe werden manuell getaktet; nur während des Mace-Sturzangriffs läuft HeroBots Angriff kontinuierlich. Komplexe Hindernisse, echte Umwege, Spawn-Schutz-Erkennung und vollständiges Pathfinding sind nicht enthalten. Die Kampfabläufe wurden anhand der Quelllogik und Spielregeln geprüft; ein Live-Duell wurde hier nicht ausgeführt.
+Das Modell ist tabulares Q-Learning, kein neuronales Netz. Es lernt Bewegungsentscheidungen aus Kampfbelohnungen sowie — nur positiv — aus den Aktionen des menschlichen Gegners; Essen, Rückzug, Schild, Waffenwechsel und Crystal-Einsatz sind regelbasierte Zusätze. Nahkampfangriffe werden manuell getaktet; nur während des Mace-Sturzangriffs läuft HeroBots Angriff kontinuierlich. Wegfindung hängt von der installierten HeroBot-Version ab; Umwege können an nicht erreichbaren Zielen scheitern. Spawn-Schutz wird nicht erkannt. Die Änderungen wurden kompiliert; ein Live-Duell wurde hier nicht ausgeführt.
 
 ## Build
 

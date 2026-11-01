@@ -1,0 +1,7 @@
+.gradle/
+build/
+work/
+run/
+config/
+*.class
+*.log

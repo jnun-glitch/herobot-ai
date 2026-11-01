@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "id": "herobot_ai_training",
+  "version": "${version}",
+  "name": "HeroBot AI Training",
+  "description": "PvP-Trainingsbot mit Arena-Zielsuche, HeroBot-Kampfsteuerung, Q-Learning und ModMenu-Feedback.",
+  "environment": "*",
+  "license": "MIT",
+  "authors": [
+    "Codex"
+  ],
+  "contact": {
+    "homepage": "https://modrinth.com/mod/herobot"
+  },
+  "entrypoints": {
+    "main": [
+      "de.codex.herobotai.HeroBotAiCommon"
+    ],
+    "client": [
+      "de.codex.herobotai.HeroBotAiClient"
+    ],
+    "modmenu": [
+      "de.codex.herobotai.HeroBotAiModMenu"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.18.5",
+    "minecraft": "~1.21.11",
+    "java": ">=21",
+    "fabric-api": "*"
+  },
+  "suggests": {
+    "herobot": "*",
+    "modmenu": ">=17.0.0 <18"
+  }
+}

@@ -405,7 +405,7 @@ final class TrainingController {
         if (!rangedActive && session.crystalPhase == CrystalPhase.IDLE) {
             tryPearl(server, session, bot, target);
         }
-        if (action == QLearningPolicy.Action.RETREAT && !rangedActive
+        if (action == QLearningPolicy.Action.RETREAT && distance < RETREAT_SAFE_DISTANCE && !rangedActive
                 && session.crystalPhase == CrystalPhase.IDLE) {
             tryWindCharge(server, session, bot);
         }
@@ -472,7 +472,9 @@ final class TrainingController {
         }
 
         boolean blocked = !bot.canSee(target);
-        boolean needsPath = session.nativePathSupported && (blocked || session.stuckChecks >= 2);
+        boolean escapeInProgress = session.obstacleEscapeUntilTick >= session.tick;
+        boolean needsPath = session.nativePathSupported && !escapeInProgress
+                && (blocked || session.stuckChecks >= 2);
         if (session.pathing && !needsPath) {
             HeroBotAdapter.stopPathing(server, session.botName);
             session.pathing = false;

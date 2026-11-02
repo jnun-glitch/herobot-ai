@@ -484,9 +484,13 @@ final class TrainingController {
 
         if (session.tick - session.lastMovementCheckTick >= MOVEMENT_PROGRESS_INTERVAL_TICKS) {
             Vec3d position = new Vec3d(bot.getX(), bot.getY(), bot.getZ());
-            if (session.lastMovementCheckPosition != null
-                    && position.squaredDistanceTo(session.lastMovementCheckPosition) < 0.09) {
-                session.stuckChecks++;
+            boolean noProgress = session.lastMovementCheckPosition != null
+                    && position.squaredDistanceTo(session.lastMovementCheckPosition) < 0.09;
+            if (noProgress) {
+                // A wall collision confirms a real obstruction, so do not wait for a
+                // second unchanged sample before pathing or taking a clear side step.
+                session.stuckChecks = bot.horizontalCollision
+                        ? 2 : session.stuckChecks + 1;
             } else {
                 session.stuckChecks = 0;
                 session.pathRetries = 0;

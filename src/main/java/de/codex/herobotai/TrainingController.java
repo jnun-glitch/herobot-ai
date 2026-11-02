@@ -67,7 +67,8 @@ final class TrainingController {
     private static final double RANGED_STOP_DISTANCE = 5.0;
     private static final long WIND_CHARGE_COOLDOWN_TICKS = 40;
     private static final long XP_BOTTLE_COOLDOWN_TICKS = 20;
-    private static final long MOVEMENT_PROGRESS_INTERVAL_TICKS = 10;
+    private static final double XP_MEND_SAFE_DISTANCE = 8.0;
+    private static final long MOVEMENT_PROGRESS_INTERVAL_TICKS = 5;
     private static final long OBSTACLE_ESCAPE_TICKS = 12;
     private static final long SPLASH_BUFF_COOLDOWN_TICKS = 100;
     /** Splash-Potion of Damage: nur aus der Naehe auf den Gegner werfen, mit eigenem Cooldown. */
@@ -355,8 +356,8 @@ final class TrainingController {
                     + " distance=" + String.format(Locale.ROOT, "%.2f", distance));
         }
 
-        if (!session.retreating && !session.healing && !enemyPressure(bot, target)
-                && bot.getHealth() >= RETREAT_END_HEALTH
+        if (!session.healing && !enemyPressure(bot, target)
+                && bot.getHealth() > RETREAT_HEALTH_THRESHOLD
                 && tryMendingExperienceBottle(server, session, bot, target)) {
             recordHealingTick(session, bot, target, state, reward);
             return;
@@ -379,6 +380,15 @@ final class TrainingController {
         }
 
         QLearningPolicy.Action action = session.policy.choose(state);
+        // Exploration and stale Q-values must not make a healthy bot flee at random.
+        // Low-health retreat is handled explicitly by the retreat state below.
+        if (!session.retreating && action == QLearningPolicy.Action.RETREAT
+                && bot.getHealth() > RETREAT_HEALTH_THRESHOLD + 4.0F) {
+            action = distance <= MELEE_DISTANCE
+                    ? (session.tick % 2 == 0 ? QLearningPolicy.Action.STRAFE_LEFT
+                    : QLearningPolicy.Action.STRAFE_RIGHT)
+                    : QLearningPolicy.Action.APPROACH;
+        }
         boolean targetBlocking = isBlocking(target);
         if (session.retreating) {
             action = QLearningPolicy.Action.RETREAT;
@@ -414,9 +424,10 @@ final class TrainingController {
         }
         boolean crystalBusy = session.crystalPhase != CrystalPhase.IDLE;
         boolean nativePathing = updatePathing(server, session, bot, target, action,
-                !rangedActive && !session.retreating && !session.healing && !crystalBusy
+                !rangedActive && !session.healing && !crystalBusy
                         && session.macePhase == MacePhase.DONE);
-        if (!nativePathing && session.obstacleEscapeUntilTick >= session.tick) {
+        boolean obstacleEscaping = !nativePathing && session.obstacleEscapeUntilTick >= session.tick;
+        if (obstacleEscaping) {
             action = session.obstacleEscapeLeft
                     ? QLearningPolicy.Action.STRAFE_LEFT : QLearningPolicy.Action.STRAFE_RIGHT;
         }
@@ -426,8 +437,13 @@ final class TrainingController {
             HeroBotAdapter.setSprint(server, session.botName, false);
             action = QLearningPolicy.Action.HOLD;
         } else if (!nativePathing) {
-            applyAction(server, session, bot, target, action);
-            if (action == QLearningPolicy.Action.STRAFE_LEFT || action == QLearningPolicy.Action.STRAFE_RIGHT) {
+            if (obstacleEscaping) {
+                applyObstacleEscape(server, session, bot, target);
+            } else {
+                applyAction(server, session, bot, target, action);
+            }
+            if (!obstacleEscaping && (action == QLearningPolicy.Action.STRAFE_LEFT
+                    || action == QLearningPolicy.Action.STRAFE_RIGHT)) {
                 lookAtCombatTarget(server, session, target);
             }
         }
@@ -452,7 +468,10 @@ final class TrainingController {
         boolean advancing = action == QLearningPolicy.Action.APPROACH
                 || action == QLearningPolicy.Action.STRAFE_LEFT
                 || action == QLearningPolicy.Action.STRAFE_RIGHT;
-        boolean monitorMovement = allowed && advancing && bot.distanceTo(target) > 3.5;
+        boolean retreating = action == QLearningPolicy.Action.RETREAT;
+        double distance = bot.distanceTo(target);
+        boolean monitorMovement = allowed && ((advancing && distance > 2.5)
+                || (retreating && distance < RETREAT_SAFE_DISTANCE));
         if (!monitorMovement) {
             resetMovementTracking(server, session);
             return false;
@@ -471,9 +490,10 @@ final class TrainingController {
             session.lastMovementCheckTick = session.tick;
         }
 
-        boolean blocked = !bot.canSee(target);
+        boolean blocked = advancing && !bot.canSee(target);
         boolean escapeInProgress = session.obstacleEscapeUntilTick >= session.tick;
-        boolean needsPath = session.nativePathSupported && !escapeInProgress
+        boolean canPathToTarget = advancing;
+        boolean needsPath = session.nativePathSupported && canPathToTarget && !escapeInProgress
                 && (blocked || session.stuckChecks >= 2);
         if (session.pathing && !needsPath) {
             HeroBotAdapter.stopPathing(server, session.botName);
@@ -496,7 +516,7 @@ final class TrainingController {
                     HeroBotAdapter.stopPathing(server, session.botName);
                     session.pathing = false;
                     session.obstacleEscapeUntilTick = session.tick + OBSTACLE_ESCAPE_TICKS;
-                    session.obstacleEscapeLeft = (session.pathRetries % 2) == 1;
+                    session.obstacleEscapeLeft = chooseObstacleEscapeLeft(bot, target, session.pathRetries++);
                     session.stuckChecks = 0;
                     TrainingLog.event("PATH_FALLBACK bot=" + session.botName
                             + " target=" + session.targetName + " retries=" + session.pathRetries);
@@ -512,9 +532,9 @@ final class TrainingController {
             return true;
         }
 
-        if (!session.nativePathSupported && session.stuckChecks >= 2) {
+        if ((!session.nativePathSupported || !canPathToTarget) && session.stuckChecks >= 2) {
             session.obstacleEscapeUntilTick = session.tick + OBSTACLE_ESCAPE_TICKS;
-            session.obstacleEscapeLeft = (session.pathRetries++ % 2) == 0;
+            session.obstacleEscapeLeft = chooseObstacleEscapeLeft(bot, target, session.pathRetries++);
             session.stuckChecks = 0;
             TrainingLog.event("OBSTACLE_ESCAPE bot=" + session.botName
                     + " target=" + session.targetName
@@ -522,6 +542,46 @@ final class TrainingController {
             if (bot.isOnGround()) HeroBotAdapter.jump(server, session.botName);
         }
         return false;
+    }
+
+    /** Chooses a side whose next player-sized step is clear, preferring alternation if both fit. */
+    private static boolean chooseObstacleEscapeLeft(ServerPlayerEntity bot, ServerPlayerEntity target,
+                                                     int attempt) {
+        Vec3d towardTarget = new Vec3d(target.getX() - bot.getX(), 0.0,
+                target.getZ() - bot.getZ()).normalize();
+        if (towardTarget.lengthSquared() < 1.0E-4) {
+            Vec3d facing = bot.getRotationVec(1.0F);
+            towardTarget = new Vec3d(facing.x, 0.0, facing.z).normalize();
+        }
+        Vec3d left = new Vec3d(towardTarget.z, 0.0, -towardTarget.x);
+        Vec3d right = left.multiply(-1.0);
+        boolean leftClear = hasHorizontalClearance(bot, left);
+        boolean rightClear = hasHorizontalClearance(bot, right);
+        if (leftClear != rightClear) return leftClear;
+        return attempt % 2 == 0;
+    }
+
+    private static boolean hasHorizontalClearance(ServerPlayerEntity bot, Vec3d direction) {
+        double nextX = bot.getX() + direction.x * 0.75;
+        double nextZ = bot.getZ() + direction.z * 0.75;
+        Box nextStep = bot.getBoundingBox().offset(direction.x * 0.75, 0.0, direction.z * 0.75);
+        if (!bot.getEntityWorld().isSpaceEmpty(bot, nextStep)) return false;
+        if (bot.isOnGround()) {
+            BlockPos support = BlockPos.ofFloored(nextX, bot.getY() - 0.05, nextZ);
+            var state = bot.getEntityWorld().getBlockState(support);
+            return state.isSolidBlock(bot.getEntityWorld(), support);
+        }
+        return true;
+    }
+
+    /** Steps sideways without pushing forward into the same wall that caused the stall. */
+    private static void applyObstacleEscape(MinecraftServer server, Session session,
+                                            ServerPlayerEntity bot, ServerPlayerEntity target) {
+        lookAtCombatTarget(server, session, target);
+        HeroBotAdapter.stopMovement(server, session.botName);
+        HeroBotAdapter.setSprint(server, session.botName, false);
+        HeroBotAdapter.move(server, session.botName, session.obstacleEscapeLeft ? "left" : "right");
+        if (bot.isOnGround()) HeroBotAdapter.jump(server, session.botName);
     }
 
     private static void resetMovementTracking(MinecraftServer server, Session session) {
@@ -1394,7 +1454,7 @@ final class TrainingController {
     private static boolean tryMendingExperienceBottle(MinecraftServer server, Session session,
                                                        ServerPlayerEntity bot, ServerPlayerEntity target) {
         if (session.itemLease != null || session.tick - session.lastExperienceBottleTick < XP_BOTTLE_COOLDOWN_TICKS
-                || bot.distanceTo(target) < 10.0 || !bot.isOnGround()) {
+                || bot.distanceTo(target) < XP_MEND_SAFE_DISTANCE || !bot.isOnGround()) {
             return false;
         }
 

@@ -1038,8 +1038,11 @@ final class TrainingController {
         boolean targetBlocking = target.isUsingItem() && target.getActiveItem().isOf(Items.SHIELD);
         boolean underThreat = session.tick - session.lastBotDamageTick <= 16;
         boolean triggerAvailable = session.tick - session.lastShieldRaiseTick >= SHIELD_RETRIGGER_COOLDOWN_TICKS;
+        // The retrigger cooldown only prevents a NEW raise. Applying it while the
+        // shield is already up made shouldShield false on the very next decision,
+        // so the bot raised and lowered the shield every five ticks.
         boolean shouldShield = hasShield && !session.healing && threatClose && targetAimingAtBot
-                && underThreat && triggerAvailable;
+                && underThreat && (session.shielding || triggerAvailable);
         if (session.shielding && session.tick - session.lastShieldRaiseTick >= SHIELD_MAX_HOLD_TICKS
                 && !underThreat) {
             shouldShield = false;
@@ -2047,6 +2050,10 @@ final class TrainingController {
     private static void tryCritMelee(MinecraftServer server, Session session,
                                      ServerPlayerEntity bot, ServerPlayerEntity target, double distance,
                                      QLearningPolicy.Action movementAction) {
+        // Do not turn back to hit while the controller is trying to create distance.
+        if (session.retreating || movementAction == QLearningPolicy.Action.RETREAT) {
+            return;
+        }
         // Laufender Crit-Nachschlag wird von tickCritAttack() abgearbeitet, nicht hier.
         if (session.pendingCritAttackTick != NO_PENDING_CRIT) {
             return;

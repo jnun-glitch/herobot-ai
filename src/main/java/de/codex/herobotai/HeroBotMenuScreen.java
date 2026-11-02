@@ -7,6 +7,8 @@ import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.screen.narration.NarrationMessageBuilder;
 import net.minecraft.client.gui.widget.ClickableWidget;
 import net.minecraft.client.gui.widget.TextFieldWidget;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
 import net.minecraft.text.Text;
 
 import java.util.List;
@@ -21,15 +23,15 @@ public final class HeroBotMenuScreen extends Screen {
     private static final int ACCENT = 0xFF58D6C4;
     private static final int MUTED = 0xFF9AAABD;
     private static final List<KitCardData> KIT_CARDS = List.of(
-            new KitCardData("iron", "Iron", "Schwert · Schild · Eisenrüstung", 0xFFB9C5D3),
-            new KitCardData("diamond", "Diamond", "Schwert · Axt · Diamantrüstung", 0xFF64DCEB),
-            new KitCardData("axe", "Axe", "Axt-Loadout für Schild-Duelle", 0xFFE8B16A),
-            new KitCardData("netherite", "Netherite", "Netheritschwert und Rüstung", 0xFFB089C8),
-            new KitCardData("mace", "Mace Flight", "Elytra · Raketen · Mace-Sturz", 0xFFFF8C69),
-            new KitCardData("crystal", "Crystal PvP", "Totem · Obsidian · Endkristalle", 0xFFDB72FF),
-            new KitCardData("fc_axe", "FC Axe", "FireClient-Axtvorlage", 0xFFE6A66E),
-            new KitCardData("fc_uhc", "FC UHC", "FireClient-UHC-Vorlage", 0xFF75D28D),
-            new KitCardData("fc_misch", "FC Misch", "Schwert · Axt · Totem", 0xFF8FA9FF));
+            new KitCardData("iron", "Iron", "Schwert · Schild · Eisenrüstung", 0xFFB9C5D3, new ItemStack(Items.IRON_SWORD)),
+            new KitCardData("diamond", "Diamond", "Schwert · Axt · Diamantrüstung", 0xFF64DCEB, new ItemStack(Items.DIAMOND_SWORD)),
+            new KitCardData("axe", "Axe", "Axt-Loadout für Schild-Duelle", 0xFFE8B16A, new ItemStack(Items.IRON_AXE)),
+            new KitCardData("netherite", "Netherite", "Netheritschwert und Rüstung", 0xFFB089C8, new ItemStack(Items.NETHERITE_SWORD)),
+            new KitCardData("mace", "Mace Flight", "Elytra · Raketen · Mace-Sturz", 0xFFFF8C69, new ItemStack(Items.MACE)),
+            new KitCardData("crystal", "Crystal PvP", "Totem · Obsidian · Endkristalle", 0xFFDB72FF, new ItemStack(Items.END_CRYSTAL)),
+            new KitCardData("fc_axe", "FC Axe", "FireClient-Axtvorlage", 0xFFE6A66E, new ItemStack(Items.IRON_AXE)),
+            new KitCardData("fc_uhc", "FC UHC", "FireClient-UHC-Vorlage", 0xFF75D28D, new ItemStack(Items.GOLDEN_APPLE)),
+            new KitCardData("fc_misch", "FC Misch", "Schwert · Axt · Totem", 0xFF8FA9FF, new ItemStack(Items.TOTEM_OF_UNDYING)));
 
     private final int page;
     private final Screen parent;
@@ -68,22 +70,23 @@ public final class HeroBotMenuScreen extends Screen {
 
         addCard(startX, startY, cardWidth, cardHeight, "TRAINING STARTEN",
                 "Direktduell · eigenes Inventar kopieren", 0xFF58D6C4,
-                () -> runCommand("hba spawn"));
+                () -> runCommand("hba spawn"), new ItemStack(Items.IRON_SWORD));
         addCard(startX + cardWidth + cardGap, startY, cardWidth, cardHeight, "KITS & LOADOUTS",
                 "Ausrüstung auswählen und bestätigen", 0xFFDB72FF,
-                () -> MinecraftClient.getInstance().setScreen(new HeroBotMenuScreen(KITS_PAGE, this)));
+                () -> MinecraftClient.getInstance().setScreen(new HeroBotMenuScreen(KITS_PAGE, this)),
+                new ItemStack(Items.CHEST));
         addCard(startX, startY + rowStep, cardWidth, cardHeight, "STATUS",
                 "Training, Kit und Lernfortschritt", 0xFF64DCEB,
-                () -> runCommand("hba status"));
+                () -> runCommand("hba status"), new ItemStack(Items.CLOCK));
         addCard(startX + cardWidth + cardGap, startY + rowStep, cardWidth, cardHeight, "TRAINING STOPPEN",
                 "Kampfsteuerung sicher anhalten", 0xFFE8B16A,
-                () -> runCommand("hba stop"));
+                () -> runCommand("hba stop"), new ItemStack(Items.SHIELD));
         addCard(startX, startY + rowStep * 2, cardWidth, cardHeight, "BOT ENTFERNEN",
                 "Aktiven Trainingsbot entfernen", 0xFFFF7777,
-                () -> runCommand("hba remove"));
+                () -> runCommand("hba remove"), new ItemStack(Items.BARRIER));
         addCard(startX + cardWidth + cardGap, startY + rowStep * 2, cardWidth, cardHeight, "HILFE",
                 "Befehle und kurze Anleitung anzeigen", 0xFF8FA9FF,
-                () -> runCommand("hba help"));
+                () -> runCommand("hba help"), new ItemStack(Items.BOOK));
     }
 
     private void initKitPage() {
@@ -118,7 +121,7 @@ public final class HeroBotMenuScreen extends Screen {
                         this.rememberedRecipient = this.recipientField == null
                                 ? this.rememberedRecipient : this.recipientField.getText();
                         this.clearAndInit();
-                    }, selected);
+                    }, selected, kit.icon());
         }
 
         KitCardData selected = selectedKitData();
@@ -168,12 +171,23 @@ public final class HeroBotMenuScreen extends Screen {
 
     private void addCard(int x, int y, int width, int height, String title, String subtitle,
                          int color, Runnable action) {
-        this.addDrawableChild(new ActionCard(x, y, width, height, title, subtitle, color, action, false));
+        addCard(x, y, width, height, title, subtitle, color, action, false, ItemStack.EMPTY);
     }
 
     private void addCard(int x, int y, int width, int height, String title, String subtitle,
                          int color, Runnable action, boolean selected) {
-        this.addDrawableChild(new ActionCard(x, y, width, height, title, subtitle, color, action, selected));
+        addCard(x, y, width, height, title, subtitle, color, action, selected, ItemStack.EMPTY);
+    }
+
+    private void addCard(int x, int y, int width, int height, String title, String subtitle,
+                         int color, Runnable action, ItemStack icon) {
+        addCard(x, y, width, height, title, subtitle, color, action, false, icon);
+    }
+
+    private void addCard(int x, int y, int width, int height, String title, String subtitle,
+                         int color, Runnable action, boolean selected, ItemStack icon) {
+        this.addDrawableChild(new ActionCard(x, y, width, height, title, subtitle, color,
+                action, selected, icon));
     }
 
     @Override
@@ -183,21 +197,32 @@ public final class HeroBotMenuScreen extends Screen {
         int top = panelTop();
         int right = left + panelWidth();
         int bottom = top + panelHeight();
+        context.fill(left - 3, top - 3, right + 3, bottom + 3, 0xA0000000);
+        context.fill(left - 1, top - 1, right + 1, bottom + 1, 0xFF26374A);
         context.fill(left, top, right, bottom, PANEL);
-        context.fill(left, top, right, top + 2, ACCENT);
+        context.fill(left, top, right, top + 3, ACCENT);
+        context.fill(left, bottom - 2, right, bottom, 0xFF26374A);
+        context.fill(left, top + 57, left + 1, bottom - 1, 0xFF26374A);
+        context.fill(right - 1, top + 57, right, bottom - 1, 0xFF26374A);
         context.fill(left + 1, top + 56, right - 1, top + 57, 0xFF233246);
 
         String title = page == KITS_PAGE ? "LOADOUT SELECTOR" : "COMBAT CONTROL CENTER";
         String subtitle = page == KITS_PAGE
                 ? "Wähle ein Kit. Vorschau ansehen. Erst nach Bestätigung anwenden."
                 : "Dein PvP-Training — schnell erreichbar, sauber gesteuert.";
-        context.drawTextWithShadow(this.textRenderer, Text.literal("HERO BOT  /  " + title),
+        int headerWidth = panelWidth() - 48 - (panelWidth() >= 500 ? 112 : 0);
+        context.drawTextWithShadow(this.textRenderer,
+                Text.literal(this.textRenderer.trimToWidth("HERO BOT  /  " + title, headerWidth)),
                 left + 24, top + 17, 0xFFF2F7FF);
-        context.drawTextWithShadow(this.textRenderer, Text.literal(subtitle),
+        context.drawTextWithShadow(this.textRenderer,
+                Text.literal(this.textRenderer.trimToWidth(subtitle, panelWidth() - 48)),
                 left + 24, top + 37, MUTED);
-        context.fill(right - 114, top + 20, right - 24, top + 39, 0xFF172636);
-        context.fill(right - 110, top + 25, right - 104, top + 31, ACCENT);
-        context.drawTextWithShadow(this.textRenderer, Text.literal("READY"), right - 96, top + 25, ACCENT);
+        if (panelWidth() >= 500) {
+            context.fill(right - 124, top + 18, right - 24, top + 40, 0xFF172636);
+            context.fill(right - 120, top + 23, right - 114, top + 29, ACCENT);
+            context.fill(right - 121, top + 22, right - 113, top + 30, 0x3058D6C4);
+            context.drawTextWithShadow(this.textRenderer, Text.literal("CLIENT UI"), right - 106, top + 24, ACCENT);
+        }
 
         if (page == KITS_PAGE) {
             if (!drawFooterStatus.isBlank()) {
@@ -232,6 +257,13 @@ public final class HeroBotMenuScreen extends Screen {
         int glow = Math.min(180, this.width / 3);
         context.fill(0, 0, glow, 3, 0xFF173A43);
         context.fill(this.width - glow, this.height - 3, this.width, this.height, 0xFF2B1B42);
+        for (int i = 0; i < 34; i++) {
+            int x = Math.floorMod(i * 137 + 29, Math.max(1, this.width));
+            int y = Math.floorMod(i * 83 + 17, Math.max(1, this.height));
+            int size = i % 7 == 0 ? 2 : 1;
+            int color = i % 3 == 0 ? 0x4058D6C4 : 0x302D8FA0;
+            context.fill(x, y, Math.min(this.width, x + size), Math.min(this.height, y + size), color);
+        }
     }
 
     private int panelWidth() {
@@ -268,7 +300,7 @@ public final class HeroBotMenuScreen extends Screen {
         return false;
     }
 
-    private record KitCardData(String id, String title, String subtitle, int color) {
+    private record KitCardData(String id, String title, String subtitle, int color, ItemStack icon) {
     }
 
     private final class SidePanel extends ClickableWidget {
@@ -286,12 +318,15 @@ public final class HeroBotMenuScreen extends Screen {
             int y = this.getY();
             context.fill(x, y, x + this.width, y + this.height, PANEL_LIGHT);
             context.fill(x, y, x + this.width, y + 2, this.kit.color());
+            context.fill(x + this.width - 43, y + 21, x + this.width - 9, y + 55, 0xFF0B121C);
+            context.fill(x + this.width - 43, y + 21, x + this.width - 9, y + 22, this.kit.color());
+            context.drawItem(this.kit.icon(), x + this.width - 34, y + 30);
+            context.fill(x + 12, y + 75, x + this.width - 12, y + 76, 0xFF2B3B50);
             context.drawTextWithShadow(textRenderer, Text.literal("SELECTED KIT"), x + 12, y + 13, MUTED);
             context.drawTextWithShadow(textRenderer, Text.literal(this.kit.title().toUpperCase()),
                     x + 12, y + 31, this.kit.color());
             context.drawTextWithShadow(textRenderer, Text.literal(this.kit.subtitle()),
                     x + 12, y + 53, 0xFFE0EAF6);
-            context.fill(x + 12, y + 75, x + this.width - 12, y + 76, 0xFF2B3B50);
             context.drawTextWithShadow(textRenderer, Text.literal("BEST FOR"), x + 12, y + 87, MUTED);
             context.drawTextWithShadow(textRenderer, Text.literal(kitHint(this.kit.id())),
                     x + 12, y + 105, 0xFFBFD0E5);
@@ -331,15 +366,17 @@ public final class HeroBotMenuScreen extends Screen {
         private final int accent;
         private final Runnable action;
         private final boolean selected;
+        private final ItemStack icon;
 
         private ActionCard(int x, int y, int width, int height, String title, String subtitle,
-                           int accent, Runnable action, boolean selected) {
+                           int accent, Runnable action, boolean selected, ItemStack icon) {
             super(x, y, width, height, Text.literal(title));
             this.title = title;
             this.subtitle = subtitle;
             this.accent = accent;
             this.action = action;
             this.selected = selected;
+            this.icon = icon;
         }
 
         @Override
@@ -347,25 +384,31 @@ public final class HeroBotMenuScreen extends Screen {
             int x = this.getX();
             int y = this.getY();
             var renderer = MinecraftClient.getInstance().textRenderer;
-            int color = this.isHovered() ? 0xFF1B2A3B : 0xFF121B29;
+            int color = this.isHovered() ? 0xFF1D3042 : this.selected ? 0xFF172637 : 0xFF121B29;
             context.fill(x, y, x + this.width, y + this.height, color);
+            context.fill(x + 3, y, x + this.width, y + 1,
+                    this.isHovered() || this.selected ? this.accent : 0xFF1B2938);
+            context.fill(x + 3, y + this.height - 1, x + this.width, y + this.height,
+                    this.isHovered() || this.selected ? this.accent : 0xFF0B111A);
             context.fill(x, y, x + 3, y + this.height, this.accent);
-            if (this.selected) {
-                context.fill(x, y, x + this.width, y + 1, this.accent);
-                context.fill(x, y + this.height - 1, x + this.width, y + this.height, this.accent);
+            boolean showIcon = !this.icon.isEmpty() && this.height >= 28 && this.width >= 108;
+            if (showIcon) {
+                context.drawItem(this.icon, x + 9, y + (this.height - 16) / 2);
             }
+            int textX = showIcon ? x + 32 : x + 11;
+            int textWidth = Math.max(1, x + this.width - 10 - textX);
             int titleY = this.subtitle.isBlank() ? y + Math.max(6, (this.height - 9) / 2) : y + 7;
             context.drawTextWithShadow(renderer,
-                    Text.literal(renderer.trimToWidth(this.title, this.width - 18)),
-                    x + 11, titleY, 0xFFF1F6FD);
+                    Text.literal(renderer.trimToWidth(this.title, textWidth)),
+                    textX, titleY, 0xFFF1F6FD);
             if (!this.subtitle.isBlank() && this.height > 32) {
                 context.drawTextWithShadow(renderer,
-                        Text.literal(renderer.trimToWidth(this.subtitle, this.width - 18)),
-                        x + 11, y + 27, MUTED);
+                        Text.literal(renderer.trimToWidth(this.subtitle, textWidth)),
+                        textX, y + 27, MUTED);
             } else if (!this.subtitle.isBlank() && this.height >= 28) {
                 context.drawTextWithShadow(renderer,
-                        Text.literal(renderer.trimToWidth(this.subtitle, this.width - 18)),
-                        x + 11, y + 18, MUTED);
+                        Text.literal(renderer.trimToWidth(this.subtitle, textWidth)),
+                        textX, y + 18, MUTED);
             }
         }
 
@@ -405,9 +448,11 @@ public final class HeroBotMenuScreen extends Screen {
             int buttonWidth = (boxWidth - 48 - buttonGap) / 2;
             int buttonY = boxTop + 166;
             this.addDrawableChild(new ActionCard(boxLeft + 24, buttonY, buttonWidth, 30,
-                    "ZURÜCK", "", 0xFF8293A8, () -> MinecraftClient.getInstance().setScreen(parent), false));
+                    "ZURÜCK", "", 0xFF8293A8, () -> MinecraftClient.getInstance().setScreen(parent),
+                    false, ItemStack.EMPTY));
             this.addDrawableChild(new ActionCard(boxLeft + 24 + buttonWidth + buttonGap, buttonY,
-                    buttonWidth, 30, "BESTÄTIGEN", "", kit.color(), this::confirm, false));
+                    buttonWidth, 30, "BESTÄTIGEN", "", kit.color(), this::confirm,
+                    false, ItemStack.EMPTY));
         }
 
         private void confirm() {
@@ -431,7 +476,10 @@ public final class HeroBotMenuScreen extends Screen {
             int left = (this.width - boxWidth) / 2;
             int top = (this.height - boxHeight) / 2;
             context.fill(left, top, left + boxWidth, top + boxHeight, 0xFF101824);
+            context.fill(left + 1, top + 1, left + boxWidth - 1, top + boxHeight - 1, 0xFF101824);
+            context.fill(left, top + boxHeight - 2, left + boxWidth, top + boxHeight, 0xFF26374A);
             context.fill(left, top, left + boxWidth, top + 3, this.kit.color());
+            context.drawItem(this.kit.icon(), left + boxWidth - 53, top + 48);
             context.drawTextWithShadow(this.textRenderer,
                     Text.literal(this.startBot ? "TRAININGSBOT STARTEN?" : "KIT ANWENDEN?"),
                     left + 24, top + 23, 0xFFF4F7FC);

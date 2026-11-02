@@ -15,38 +15,30 @@ enum PvPKit {
     MACE("mace", "diamond", "mace"),
     CRYSTAL("crystal", "netherite", "netherite_sword"),
     // FireClient-Vorlagen des Users (fireclient/kits/*.json), 1:1 nachgebaut.
-    FC_AXE("fc_axe", "diamond", "diamond_axe", null, true),
-    FC_UHC("fc_uhc", "diamond", "diamond_sword", null, true),
-    FC_MISCH("fc_misch", "netherite", "netherite_sword", "minecraft:netherite_axe", false);
+    FC_AXE("fc_axe", "diamond", "diamond_axe", null),
+    FC_UHC("fc_uhc", "diamond", "diamond_sword", null),
+    FC_MISCH("fc_misch", "netherite", "netherite_sword", "minecraft:netherite_axe");
 
     private final String commandName;
     private final String armorMaterial;
     private final String weapon;
     /** Zweite Waffe im Hotbar (isReady-Check), z. B. die Axt im fc_misch-Kit. */
     private final String secondaryWeapon;
-    /** true, solange die Waffe im ersten Hotbar-Slot liegen muss. */
-    private final boolean primarySlotWeapon;
 
     /** Alte Kits: Waffe im Slot 0, keine Zweitwaffe. */
     PvPKit(String commandName, String armorMaterial, String weapon) {
-        this(commandName, armorMaterial, weapon, null, true);
+        this(commandName, armorMaterial, weapon, null);
     }
 
-    PvPKit(String commandName, String armorMaterial, String weapon,
-           String secondaryWeapon, boolean primarySlotWeapon) {
+    PvPKit(String commandName, String armorMaterial, String weapon, String secondaryWeapon) {
         this.commandName = commandName;
         this.armorMaterial = armorMaterial;
         this.weapon = weapon;
         this.secondaryWeapon = secondaryWeapon;
-        this.primarySlotWeapon = primarySlotWeapon;
     }
 
     String commandName() {
         return commandName;
-    }
-
-    boolean isElytraMace() {
-        return this == MACE;
     }
 
     /** FireClient-Vorlagen: reine Inventar-Kits, kein Elytra-Flugverhalten. */
@@ -81,10 +73,14 @@ enum PvPKit {
                 || !weapon.equals(Registries.ITEM.getId(bot.getInventory().getStack(0).getItem()).getPath())) {
             return false;
         }
-        return !primarySlotWeapon
-                || this != MACE
-                || bot.getEquippedStack(net.minecraft.entity.EquipmentSlot.CHEST).isOf(Items.ELYTRA)
-                && bot.getInventory().getStack(1).isOf(Items.FIREWORK_ROCKET);
+        if (this != MACE) return true;
+        if (!bot.getEquippedStack(net.minecraft.entity.EquipmentSlot.CHEST).isOf(Items.DIAMOND_CHESTPLATE)) {
+            return false;
+        }
+        for (int slot = 0; slot < 36; slot++) {
+            if (bot.getInventory().getStack(slot).isOf(Items.WIND_CHARGE)) return true;
+        }
+        return false;
     }
 
     static PvPKit parse(String name) {
@@ -108,14 +104,16 @@ enum PvPKit {
         }
         List<String> commands = new ArrayList<>();
         commands.add("clear " + botName);
-        commands.add(item(botName, "hotbar.0", "minecraft:" + weapon, 1));
-        commands.add(item(botName, "hotbar.1", this == MACE ? "minecraft:firework_rocket" : "minecraft:ender_pearl",
+        commands.add(this == MACE
+                ? itemC(botName, "hotbar.0", "minecraft:mace", 1,
+                "minecraft:enchantments={density:5,wind_burst:3,unbreaking:3}")
+                : item(botName, "hotbar.0", "minecraft:" + weapon, 1));
+        commands.add(item(botName, "hotbar.1", this == MACE ? "minecraft:wind_charge" : "minecraft:ender_pearl",
                 this == MACE ? 32 : 8));
         commands.add(item(botName, "hotbar.2", "minecraft:golden_apple", 8));
         commands.add(item(botName, "inventory.0", "minecraft:cooked_beef", 16));
         if (this == MACE) {
             commands.add(item(botName, "hotbar.3", "minecraft:ender_pearl", 8));
-            commands.add(item(botName, "hotbar.7", "minecraft:diamond_chestplate", 1));
         }
         String secondaryWeapon = switch (this) {
             case IRON -> "minecraft:iron_axe";
@@ -129,7 +127,7 @@ enum PvPKit {
         }
         commands.add(item(botName, "weapon.offhand", "minecraft:shield", 1));
         commands.add(item(botName, "armor.head", "minecraft:" + armorMaterial + "_helmet", 1));
-        commands.add(item(botName, "armor.chest", this == MACE ? "minecraft:elytra" : "minecraft:" + armorMaterial + "_chestplate", 1));
+        commands.add(item(botName, "armor.chest", "minecraft:" + armorMaterial + "_chestplate", 1));
         commands.add(item(botName, "armor.legs", "minecraft:" + armorMaterial + "_leggings", 1));
         commands.add(item(botName, "armor.feet", "minecraft:" + armorMaterial + "_boots", 1));
         commands.add("player " + botName + " hotbar 1");

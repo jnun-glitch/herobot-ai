@@ -27,7 +27,7 @@ public final class HeroBotMenuScreen extends Screen {
             new KitCardData("diamond", "Diamond", "Schwert · Axt · Diamantrüstung", 0xFF64DCEB, new ItemStack(Items.DIAMOND_SWORD)),
             new KitCardData("axe", "Axe", "Axt-Loadout für Schild-Duelle", 0xFFE8B16A, new ItemStack(Items.IRON_AXE)),
             new KitCardData("netherite", "Netherite", "Netheritschwert und Rüstung", 0xFFB089C8, new ItemStack(Items.NETHERITE_SWORD)),
-            new KitCardData("mace", "Mace Flight", "Elytra · Raketen · Mace-Sturz", 0xFFFF8C69, new ItemStack(Items.MACE)),
+            new KitCardData("mace", "Mace + Wind Charge", "Wind Charge · Density V · Wind Burst III", 0xFFFF8C69, new ItemStack(Items.MACE)),
             new KitCardData("crystal", "Crystal PvP", "Totem · Obsidian · Endkristalle", 0xFFDB72FF, new ItemStack(Items.END_CRYSTAL)),
             new KitCardData("fc_axe", "FC Axe", "FireClient-Axtvorlage", 0xFFE6A66E, new ItemStack(Items.IRON_AXE)),
             new KitCardData("fc_uhc", "FC UHC", "FireClient-UHC-Vorlage", 0xFF75D28D, new ItemStack(Items.GOLDEN_APPLE)),
@@ -352,7 +352,7 @@ public final class HeroBotMenuScreen extends Screen {
         return switch (id) {
             case "iron", "diamond", "netherite" -> "Schwert-Duelle";
             case "axe", "fc_axe" -> "Axt- und Schildkampf";
-            case "mace" -> "Elytra-Mace-Angriffe";
+            case "mace" -> "Wind-Charge-Mace-Angriffe";
             case "crystal" -> "Crystal PvP und Totem-Spiel";
             case "fc_uhc" -> "UHC-Nahkampf";
             case "fc_misch" -> "Gemischter Schwert-Axt-Kampf";

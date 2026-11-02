@@ -8,6 +8,7 @@ import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.attribute.EntityAttributes;
 import net.minecraft.enchantment.EnchantmentHelper;
 import net.minecraft.enchantment.Enchantments;
+import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.item.Items;
 import net.minecraft.item.CrossbowItem;
 import net.minecraft.block.Blocks;
@@ -65,7 +66,7 @@ final class TrainingController {
     private static final double RANGED_MIN_DISTANCE = 8.0;
     private static final double RANGED_MAX_DISTANCE = 28.0;
     private static final double RANGED_STOP_DISTANCE = 5.0;
-    private static final long WIND_CHARGE_COOLDOWN_TICKS = 40;
+    private static final long WIND_CHARGE_COOLDOWN_TICKS = 10;
     private static final long XP_BOTTLE_COOLDOWN_TICKS = 20;
     private static final double XP_MEND_SAFE_DISTANCE = 8.0;
     private static final long MOVEMENT_PROGRESS_INTERVAL_TICKS = 5;
@@ -85,9 +86,12 @@ final class TrainingController {
     private static final long HEAL_DURATION_TICKS = 44;
     private static final long HEAL_COOLDOWN_TICKS = 120;
     private static final long SPAWN_TIMEOUT_TICKS = 400;
-    private static final int MACE_LAUNCH_HEIGHT = 14;
-    private static final int MACE_CLIMB_HEIGHT = 20;
-    private static final int MACE_MAX_CLIMB_TICKS = 45;
+    private static final double MACE_MIN_LAUNCH_HEIGHT = 4.5;
+    private static final double MACE_MIN_SMASH_FALL = 2.0;
+    private static final double MACE_OPENER_MAX_DISTANCE = 14.0;
+    private static final int MACE_WINDUP_TIMEOUT_TICKS = 10;
+    private static final int MACE_ASCENT_TIMEOUT_TICKS = 40;
+    private static final int MACE_LAUNCH_CLEARANCE = 12;
     private static final int MACE_DIVE_TIMEOUT_TICKS = 80;
     /** Pause nach abgeschlossenem Mace-Opener, bevor der naechste Flug anlaeuft. */
     private static final int MACE_OPENER_COOLDOWN_TICKS = 200;
@@ -182,7 +186,7 @@ final class TrainingController {
         QLearningPolicy policy = new QLearningPolicy(kit);
         active = new Session(server, botName, targetName, policy, kit, previousCombatSettings);
         Session startedSession = active;
-        if (hasMaceFlightLoadout(bot)) {
+        if (hasWindChargeMaceLoadout(bot)) {
             startedSession.maceLoadout = true;
             beginMaceOpener(startedSession, bot, target);
         } else {
@@ -196,7 +200,7 @@ final class TrainingController {
                 + " mode=q-learning-combat");
         source.sendFeedback(() -> Text.literal("PvP-Training gestartet: " + botName + " gegen " + targetName
                 + " · Kit: " + kit.commandName() + (startedSession.maceLoadout
-                ? ". Elytra-Mace-Startmanöver läuft, danach kämpft und lernt der Bot normal weiter."
+                ? ". Wind-Charge-Mace-Manöver läuft, danach kämpft und lernt der Bot normal weiter."
                 : ". Er greift an und lernt Bewegungen.")), false);
         source.sendFeedback(() -> Text.literal("Stoppen: /hba stop · Entfernen: /hba remove"), false);
     }
@@ -720,7 +724,7 @@ final class TrainingController {
         }
         Session session = active;
         String maceStatus = session.maceLoadout
-                ? " · Elytra-Mace: " + session.macePhase.name().toLowerCase(Locale.ROOT) : "";
+                ? " · Wind-Charge-Mace: " + session.macePhase.name().toLowerCase(Locale.ROOT) : "";
         source.sendFeedback(() -> Text.literal("Training aktiv: " + session.botName + " gegen " + session.targetName
                 + " · Kit: " + session.kit.commandName() + " · Entscheidungen: " + session.decisions + " · Q-Updates: " + session.policy.updates()
                 + " · Zustände: " + session.policy.stateCount() + maceStatus), false);
@@ -946,16 +950,15 @@ final class TrainingController {
         return Registries.ITEM.getId(stack.getItem()).getPath();
     }
 
-    private static boolean hasMaceFlightLoadout(ServerPlayerEntity bot) {
-        if (!bot.getEquippedStack(EquipmentSlot.CHEST).isOf(Items.ELYTRA)) return false;
+    private static boolean hasWindChargeMaceLoadout(ServerPlayerEntity bot) {
         boolean mace = false;
-        boolean rocket = false;
+        boolean windCharge = false;
         for (int slot = 0; slot < 36; slot++) {
             ItemStack stack = bot.getInventory().getStack(slot);
             mace |= stack.isOf(Items.MACE);
-            rocket |= stack.isOf(Items.FIREWORK_ROCKET);
+            windCharge |= stack.isOf(Items.WIND_CHARGE);
         }
-        return mace && rocket;
+        return mace && windCharge;
     }
 
     private static boolean moveShieldToOffhand(ServerPlayerEntity bot) {
@@ -1064,11 +1067,7 @@ final class TrainingController {
                 new Vec3d(target.getX(), target.getY() + 0.9, target.getZ()), 1);
     }
 
-    /**
-     * Startet den Elytra-Mace-Opener erneut. Bislang lief er nur einmal nach dem Spawn
-     * (danach blieb macePhase dauerhaft DONE). Bedingung: Cooldown abgelaufen, kein
-     * Rueckzug/Heilen/Fernkampf, Bot steht mit Abstand am Boden, Loadout noch vollstaendig.
-     */
+    /** Starts another wind-charge mace attempt once the bot is grounded and in range. */
     private static void maybeRestartMaceOpener(Session session, ServerPlayerEntity bot, ServerPlayerEntity target) {
         if (!session.maceLoadout || session.macePhase != MacePhase.DONE) {
             return;
@@ -1083,7 +1082,7 @@ final class TrainingController {
             return;
         }
         double distance = bot.distanceTo(target);
-        if (distance < 6.0 || distance > 24.0 || !hasMaceFlightLoadout(bot)) {
+        if (distance > MACE_OPENER_MAX_DISTANCE || !hasWindChargeMaceLoadout(bot)) {
             return;
         }
         beginMaceOpener(session, bot, target);
@@ -1091,15 +1090,19 @@ final class TrainingController {
 
     private static void beginMaceOpener(Session session, ServerPlayerEntity bot, ServerPlayerEntity target) {
         MinecraftServer server = session.server;
-        // Auch bei Abbruch den Cooldown starten, sonst wird der Opener jeden Tick erneut versucht.
+        if (bot.distanceTo(target) > MACE_OPENER_MAX_DISTANCE) {
+            HeroBotAdapter.setAutoJump(server, session.botName, true);
+            return;
+        }
+        if (!bot.isOnGround()) {
+            HeroBotAdapter.setAutoJump(server, session.botName, true);
+            return;
+        }
+        // Auch bei fehlendem Platz den Cooldown starten, damit der Bot nicht jede Tickrunde neu prüft.
         session.lastMaceOpenerTick = session.tick;
-        double launchY = target.getBlockY() + MACE_LAUNCH_HEIGHT;
-        if (launchY + 2 >= target.getEntityWorld().getTopYInclusive()
-                || !hasClearMaceColumn(bot, target, (int) launchY)) {
+        if (!hasClearMaceLaunchColumn(bot)) {
             session.macePhase = MacePhase.DONE;
-            execute(server, "player " + session.botName + " autojump true");
-            // Siehe Start: kein attack continuous, sonst trifft tryCritMelee immer mit leerem
-            // Attack-Strength-Meter an.
+            HeroBotAdapter.setAutoJump(server, session.botName, true);
             TrainingLog.event("MACE_SKIP bot=" + session.botName + " reason=no_clear_vertical_space");
             return;
         }
@@ -1109,87 +1112,106 @@ final class TrainingController {
         session.maceState = combatState(session, bot, target);
         HeroBotAdapter.setAttacking(server, session.botName, false);
         HeroBotAdapter.setAutoJump(server, session.botName, false);
-        HeroBotAdapter.teleport(server, session.botName,
-                new Vec3d(bot.getX(), launchY, bot.getZ()), bot.getYaw(), -15.0F);
-        aimClimb(server, session, bot, target);
-        HeroBotAdapter.move(server, session.botName, "forward");
-        HeroBotAdapter.setSprint(server, session.botName, true);
-        session.macePhase = MacePhase.WAIT_GLIDE;
+        HeroBotAdapter.stopMovement(server, session.botName);
+        session.maceLaunchY = bot.getY();
+        session.macePeakY = bot.getY();
+        session.maceAttackIssued = false;
+        HeroBotAdapter.lookAtPositionNow(server, session.botName,
+                new Vec3d(bot.getX(), bot.getY() - 1.0, bot.getZ()));
+        HeroBotAdapter.jump(server, session.botName);
+        session.macePhase = MacePhase.WINDUP;
         session.macePhaseTicks = 0;
         TrainingLog.event("MACE_SETUP bot=" + session.botName + " target=" + session.targetName
-                + " launch_y=" + String.format(Locale.ROOT, "%.1f", launchY));
+                + " method=wind_charge distance="
+                + String.format(Locale.ROOT, "%.2f", bot.distanceTo(target)));
     }
 
-    private static boolean hasClearMaceColumn(ServerPlayerEntity bot, ServerPlayerEntity target, int launchY) {
-        int bottomY = Math.min(bot.getBlockY(), target.getBlockY()) + 1;
-        int botX = bot.getBlockX();
-        int botZ = bot.getBlockZ();
-        int targetX = target.getBlockX();
-        int targetZ = target.getBlockZ();
-        for (int y = bottomY; y <= launchY + 1; y++) {
-            if (!target.getEntityWorld().getBlockState(new BlockPos(botX, y, botZ)).isAir()
-                    || !target.getEntityWorld().getBlockState(new BlockPos(targetX, y, targetZ)).isAir()) {
+    private static boolean hasClearMaceLaunchColumn(ServerPlayerEntity bot) {
+        int launchY = Math.min(bot.getEntityWorld().getTopYInclusive(),
+                bot.getBlockY() + MACE_LAUNCH_CLEARANCE);
+        for (int y = bot.getBlockY() + 1; y <= launchY; y++) {
+            if (!bot.getEntityWorld().getBlockState(new BlockPos(bot.getBlockX(), y, bot.getBlockZ())).isAir()) {
                 return false;
             }
         }
-        return true;
+        return launchY - bot.getBlockY() >= MACE_MIN_LAUNCH_HEIGHT;
     }
 
     private static void tickMaceOpener(Session session, ServerPlayerEntity bot, ServerPlayerEntity target) {
         MinecraftServer server = session.server;
         session.macePhaseTicks++;
+        if (bot.getHealth() <= RETREAT_HEALTH_THRESHOLD) {
+            finishMaceOpener(session, bot, target, "cancelled_low_health");
+            return;
+        }
         switch (session.macePhase) {
-            case WAIT_GLIDE -> {
+            case WINDUP -> {
                 if (bot.isGliding()) {
-                    aimClimb(server, session, bot, target);
-                    if (!useItemOnce(server, session, bot, Items.FIREWORK_ROCKET)) {
-                        finishMaceOpener(session, bot, target, "no_rocket_available");
-                        return;
-                    }
-                    session.maceBoosts++;
-                    session.maceBoostTick = session.tick;
-                    session.macePhase = MacePhase.CLIMB;
-                    session.macePhaseTicks = 0;
-                    TrainingLog.event("MACE_GLIDE bot=" + session.botName + " firework_boost=" + session.maceBoosts);
+                    finishMaceOpener(session, bot, target, "cancelled_elytra_flight");
                     return;
                 }
-                if (session.macePhaseTicks == 3) {
-                    aimClimb(server, session, bot, target);
-                    HeroBotAdapter.jump(server, session.botName);
+                if (bot.isOnGround()) {
+                    if (session.macePhaseTicks % 3 == 0) HeroBotAdapter.jump(server, session.botName);
+                    if (session.macePhaseTicks >= MACE_WINDUP_TIMEOUT_TICKS) {
+                        finishMaceOpener(session, bot, target, "jump_failed");
+                    }
+                    return;
                 }
-                if (session.macePhaseTicks >= 24 || bot.getY() <= target.getY() + 3) {
-                    finishMaceOpener(session, bot, target, "elytra_activation_failed");
+                int windChargeSlot = findInventorySlot(bot, stack -> stack.isOf(Items.WIND_CHARGE));
+                if (windChargeSlot < 0) {
+                    finishMaceOpener(session, bot, target, "wind_charge_unavailable");
+                    return;
                 }
+                HeroBotAdapter.lookAtPositionNow(server, session.botName,
+                        new Vec3d(bot.getX(), bot.getY() - 1.0, bot.getZ()));
+                if (!useItemOnceFromSlot(server, session, bot, windChargeSlot)) {
+                    finishMaceOpener(session, bot, target, "wind_charge_use_failed");
+                    return;
+                }
+                session.lastWindChargeTick = session.tick;
+                session.maceLaunchY = bot.getY();
+                session.macePeakY = bot.getY();
+                session.macePhase = MacePhase.ASCENT;
+                session.macePhaseTicks = 0;
+                TrainingLog.event("MACE_WIND_CHARGE bot=" + session.botName
+                        + " y=" + String.format(Locale.ROOT, "%.2f", bot.getY()));
             }
-            case CLIMB -> {
-                if (session.tick % 5 == 0) {
-                    aimClimb(server, session, bot, target);
+            case ASCENT -> {
+                session.macePeakY = Math.max(session.macePeakY, bot.getY());
+                if (session.tick % 3 == 0) {
+                    HeroBotAdapter.lookAtEntityNow(server, session.botName, session.targetName);
                     HeroBotAdapter.move(server, session.botName, "forward");
                 }
-                if (session.maceBoosts < 2 && session.tick - session.maceBoostTick >= 18
-                        && bot.getY() < target.getY() + MACE_CLIMB_HEIGHT
-                        && findInventorySlot(bot, stack -> stack.isOf(Items.FIREWORK_ROCKET)) >= 0) {
-                    if (useItemOnce(server, session, bot, Items.FIREWORK_ROCKET)) {
-                        session.maceBoosts++;
-                        session.maceBoostTick = session.tick;
-                        TrainingLog.event("MACE_BOOST bot=" + session.botName + " count=" + session.maceBoosts);
-                    }
-                }
-                if (bot.getY() >= target.getY() + MACE_CLIMB_HEIGHT
-                        || session.macePhaseTicks >= MACE_MAX_CLIMB_TICKS
-                        || (session.macePhaseTicks >= 12 && !bot.isGliding())) {
+                boolean enoughHeight = session.macePeakY - session.maceLaunchY >= MACE_MIN_LAUNCH_HEIGHT;
+                if (enoughHeight && bot.getVelocity().y <= 0.0) {
                     startMaceDive(session, bot, target);
+                } else if (session.macePhaseTicks >= MACE_ASCENT_TIMEOUT_TICKS) {
+                    finishMaceOpener(session, bot, target, "wind_charge_launch_failed");
                 }
             }
             case DIVE -> {
-                if (session.tick % 4 == 0) {
+                session.macePeakY = Math.max(session.macePeakY, bot.getY());
+                if (session.tick % 2 == 0) {
                     HeroBotAdapter.lookAtEntityNow(server, session.botName, session.targetName);
                     HeroBotAdapter.move(server, session.botName, "forward");
                 }
                 if (target.getHealth() < session.maceInitialTargetHealth) {
                     finishMaceOpener(session, bot, target, "mace_hit");
-                } else if (bot.isOnGround() || bot.getY() <= target.getY() + 1.0
-                        || session.macePhaseTicks >= MACE_DIVE_TIMEOUT_TICKS) {
+                } else if (!session.maceAttackIssued && !bot.isOnGround() && !bot.isGliding()
+                        && bot.getVelocity().y < 0.0
+                        && session.macePeakY - bot.getY() >= MACE_MIN_SMASH_FALL
+                        && bot.distanceTo(target) <= MANUAL_ATTACK_DISTANCE
+                        && bot.canSee(target)
+                        && !bot.hasStatusEffect(StatusEffects.SLOW_FALLING)) {
+                    HeroBotAdapter.setAttacking(server, session.botName, false);
+                    HeroBotAdapter.attackOnce(server, session.botName);
+                    session.maceAttackIssued = true;
+                    session.lastManualAttackTick = session.tick;
+                    session.meleeSwingCount++;
+                    TrainingLog.event("MACE_SMASH_ATTEMPT bot=" + session.botName + " target=" + session.targetName
+                            + " fall=" + String.format(Locale.ROOT, "%.2f", session.macePeakY - bot.getY())
+                            + " distance=" + String.format(Locale.ROOT, "%.2f", bot.distanceTo(target)));
+                } else if (bot.isOnGround() || session.macePhaseTicks >= MACE_DIVE_TIMEOUT_TICKS) {
                     finishMaceOpener(session, bot, target, "dive_missed");
                 }
             }
@@ -1197,16 +1219,6 @@ final class TrainingController {
         }
         session.lastBotHealth = bot.getHealth();
         session.lastTargetHealth = target.getHealth();
-    }
-
-    private static void aimClimb(MinecraftServer server, Session session,
-                                 ServerPlayerEntity bot, ServerPlayerEntity target) {
-        double dx = target.getX() - bot.getX();
-        double dz = target.getZ() - bot.getZ();
-        double horizontalDistance = Math.max(0.001, Math.sqrt(dx * dx + dz * dz));
-        Vec3d aim = new Vec3d(bot.getX() + dx / horizontalDistance * 20.0,
-                bot.getY() + 9.0, bot.getZ() + dz / horizontalDistance * 20.0);
-        HeroBotAdapter.lookAtPosition(server, session.botName, aim, 3);
     }
 
     private static void startMaceDive(Session session, ServerPlayerEntity bot, ServerPlayerEntity target) {
@@ -1218,12 +1230,14 @@ final class TrainingController {
         session.itemLeaseRestoreTick = Long.MAX_VALUE;
         session.macePhase = MacePhase.DIVE;
         session.macePhaseTicks = 0;
+        session.maceAttackIssued = false;
+        HeroBotAdapter.setAttacking(session.server, session.botName, false);
         HeroBotAdapter.lookAtEntityNow(session.server, session.botName, session.targetName);
         HeroBotAdapter.move(session.server, session.botName, "forward");
         HeroBotAdapter.setSprint(session.server, session.botName, true);
-        HeroBotAdapter.setAttacking(session.server, session.botName, true);
         TrainingLog.event("MACE_DIVE bot=" + session.botName + " target=" + session.targetName
-                + " height=" + String.format(Locale.ROOT, "%.1f", bot.getY() - target.getY()));
+                + " height=" + String.format(Locale.ROOT, "%.1f", bot.getY() - target.getY())
+                + " fall=" + String.format(Locale.ROOT, "%.1f", session.macePeakY - bot.getY()));
     }
 
     private static void finishMaceOpener(Session session, ServerPlayerEntity bot,
@@ -2487,11 +2501,12 @@ final class TrainingController {
         private boolean maceLoadout;
         private MacePhase macePhase = MacePhase.DONE;
         private int macePhaseTicks;
-        private int maceBoosts;
-        private long maceBoostTick;
         private long lastMaceOpenerTick = -MACE_OPENER_COOLDOWN_TICKS;
         private float maceInitialBotHealth;
         private float maceInitialTargetHealth;
+        private double maceLaunchY;
+        private double macePeakY;
+        private boolean maceAttackIssued;
         private String maceState;
         private long lastBotDamageTick = Long.MIN_VALUE / 2;
         private long lastTargetHitTick;
@@ -2549,8 +2564,8 @@ final class TrainingController {
     }
 
     private enum MacePhase {
-        WAIT_GLIDE,
-        CLIMB,
+        WINDUP,
+        ASCENT,
         DIVE,
         DONE
     }

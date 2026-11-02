@@ -13,19 +13,22 @@ Die Mod nutzt HeroBots dokumentierte Befehle `/playerspawn` und `/player`. HeroB
 
 ## Direktes Duell
 
+    /hba
+    /hba kit gui
     /hba spawn
     /hba spawn TrainingsBot Spielername
     /hba spawn kit diamond TrainingsBot Spielername
     /hba spawn kit mace TrainingsBot Spielername
-    /hba kit
     /hba kit diamond
     /hba kit diamond Spielername
+
+`/hba` öffnet das Control Center. `/hba kit` oder `/hba kit gui` öffnet die Kit-Auswahl mit Vorschau. Die GUI kann ein Kit an dich oder einen ausgewählten Spieler vergeben; vor dem Ersetzen des Inventars erscheint eine Bestätigung. `/hba kit list` zeigt die verfügbaren Kits als Chattext. Die GUI benötigt diese Mod auch auf dem Client und auf dem Server.
 
 Ohne Kit kopiert der Bot Inventar, Rüstung, Offhand und Hotbar-Auswahl des Gegners. Er kopiert ausdrücklich nicht dessen Action-Pack oder Tasteneingaben. In einem Duell steuert ausschließlich der Kampfcontroller Bot-Aktionen; er verfolgt den Gegner, greift an, springt bei Bedarf und lernt seine Bewegungswahl anhand von Abstand, Lebenspunkten, ob das Ziel blockt, eigener Waffe und ausgeteiltem/eingestecktem Schaden.
 
 Der Bot lernt zusätzlich aus deinem Spiel: Aus deiner Bewegung im Kampf wird abgeleitet, welche Aktion du ausgeführt hast (Annäherung, Seitwärts, Rückzug, Halten), und in die Q-Tabelle des gewählten Kits geschrieben — aber nur mit positiven Belohnungen: Schaden, den du dem Bot machst, und +12 für deinen Sieg. Deine Fehler werden nie bestraft. Der Zustand berücksichtigt Abstand, Lebenspunkte, Waffenklasse, Boden/Luft, Blocken, Axtverfügbarkeit, Sichtlinie, Blickrichtung, Angriffscooldown und Elytra-Gleitflug. Jedes Kit lernt separat. Die Erkundungsrate sinkt mit der Zeit von 0,18 auf 0,03, damit der Bot gelerntes statt Zufall anwendet.
 
-`/hba kit` zeigt die verfügbaren Preset-Kits. `/hba kit <Kit>` gibt dir das gewählte Kit direkt, ohne einen Bot zu spawnen. Optional kann ein Spielername als Ziel angegeben werden: `/hba kit <Kit> <Spielername>`; die umgekehrte Reihenfolge wird ebenfalls akzeptiert. Das Kit ersetzt das bisherige Inventar des Empfängers. Die Waffe liegt danach im ersten Hotbar-Slot.
+`/hba kit <Kit>` gibt dir das gewählte Kit direkt, ohne einen Bot zu spawnen. Optional kann ein Spielername als Ziel angegeben werden: `/hba kit <Kit> <Spielername>`; die umgekehrte Reihenfolge wird ebenfalls akzeptiert. Das Kit ersetzt das bisherige Inventar des Empfängers. Die Waffe liegt danach im ersten Hotbar-Slot.
 
 Im direkten Duell verfolgt der Bot Ziele, die weiter als 2,45 Blöcke entfernt sind, richtet den Blick direkt auf das Ziel und führt zeitlich gesteuerte Einzelschläge aus. Wenn die installierte HeroBot-Version `player <Bot> path entity <Ziel>` anbietet, verwendet er diesen Wegfinder bei Hindernissen und wiederholt festgefahrene Pfade. Ohne den Befehl erkennt er Stillstand schneller und wählt einen freien Seitenschritt, der keine Vorwärtsbewegung in dieselbe Wand erzwingt und auf festem Boden bleibt. Auch ein blockierter Rückzug löst diese Ausweichhilfe aus. Beim Crystal-Kit bleibt er auf Nahkampf und Crystal-PvP ausgelegt, statt auf die Armbrust zu wechseln. Ein gelernter oder zufällig gewählter Rückzug wird bei hoher Gesundheit unterbunden. Bei einem Gegner im Kreativmodus zeigt der Start einen Hinweis, weil dieser keinen normalen Kampfschaden nimmt. Die Kampfdaten protokollieren erkannte Bot- und Zielschäden getrennt.
 
@@ -37,11 +40,14 @@ Die Arena wurde entfernt. `/hba arena` und `config/herobot-pvp-bot.json` existie
 
 ## Befehle
 
+- `/hba` oder `/hba menu` — Control Center öffnen.
+- `/hba kit` oder `/hba kit gui` — Kit-GUI mit Vorschau öffnen.
+- `/hba kit list` — Kits als Chattext anzeigen.
 - `/hba status` — Duell-Status, Kit, Q-Learning-Zähler.
 - `/hba stop` — aktiven Kampf anhalten.
 - `/hba remove [BotName]` — aktiven oder benannten HeroBot entfernen.
-- `/hba kit [Kit] [Spieler]` — verfügbare Kits anzeigen oder ein Preset direkt an einen Spieler vergeben; kein Bot erforderlich.
-- `/hba kits` — Kits anzeigen.
+- `/hba kit <Kit> [Spieler]` — Preset direkt an dich oder einen Spieler vergeben; kein Bot erforderlich.
+- `/hba kits` — Kit-GUI öffnen.
 - `/hba help` — Befehlsübersicht.
 
 Im Nahkampf greift er waffenabhaengig zum richtigen Moment an (Schwert ab 11, Axt ab 17 Ticks) und springt auf 2,5 Bloecke fast vor jedem Schlag. Der Angriff erfolgt in der fallenden Phase und wird als Crit-Absicht protokolliert (`crit_intent=true`); ob Minecraft alle Crit-Bedingungen erfuellt, muss im Spiel beobachtet werden. Nach jedem Treffer setzt er den Sprint kurz ab (`wtap=true`). Das Q-Learning-Modell entscheidet die Nahkampfbewegung selbst; sein Zustand umfasst Waffenklasse, Abstand, Lebenspunkte, Boden-/Luftstatus, Blocken, Axtverfügbarkeit, Sichtlinie, Blickrichtung, Angriffscooldown und Elytra-Gleitflug.

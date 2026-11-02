@@ -11,6 +11,7 @@ import net.minecraft.server.command.CommandManager;
 import net.minecraft.server.command.ServerCommandSource;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.text.Text;
+import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 
 import java.util.List;
 
@@ -31,6 +32,9 @@ public final class HeroBotCommands {
     public static LiteralArgumentBuilder<ServerCommandSource> create(String name) {
         return literal(name)
                 .requires(CommandManager.requirePermissionLevel(CommandManager.GAMEMASTERS_CHECK))
+                .executes(context -> openMenu(context.getSource(), HeroBotMenuScreen.HOME_PAGE))
+                .then(literal("menu").executes(context -> openMenu(
+                        context.getSource(), HeroBotMenuScreen.HOME_PAGE)))
                 .then(literal("help").executes(context -> help(context.getSource())))
                 .then(literal("spawn")
                         .executes(context -> spawn(context, "PvPTrainer", null, PvPKit.COPY))
@@ -61,7 +65,10 @@ public final class HeroBotCommands {
                                 .executes(context -> removeNamed(context.getSource(),
                                         StringArgumentType.getString(context, "botName")))))
                 .then(literal("kit")
-                        .executes(context -> listGrantableKits(context.getSource()))
+                        .executes(context -> openMenu(context.getSource(), HeroBotMenuScreen.KITS_PAGE))
+                        .then(literal("gui").executes(context -> openMenu(
+                                context.getSource(), HeroBotMenuScreen.KITS_PAGE)))
+                        .then(literal("list").executes(context -> listGrantableKits(context.getSource())))
                         .then(argument("first", StringArgumentType.word())
                                 .suggests((context, builder) -> CommandSource.suggestMatching(
                                         List.of("iron", "diamond", "axe", "netherite", "mace", "crystal",
@@ -73,7 +80,19 @@ public final class HeroBotCommands {
                                                 StringArgumentType.getString(context, "first"),
                                                 StringArgumentType.getString(context, "second"))))))
                 .then(literal("status").executes(context -> status(context.getSource())))
-                .then(literal("kits").executes(context -> listKits(context.getSource())));
+                .then(literal("kits").executes(context -> openMenu(
+                        context.getSource(), HeroBotMenuScreen.KITS_PAGE)));
+    }
+
+    private static int openMenu(ServerCommandSource source, int page)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayerEntity player = source.getPlayerOrThrow();
+        if (!ServerPlayNetworking.canSend(player, OpenMenuPayload.ID)) {
+            source.sendError(Text.literal("Für die GUI muss HeroBot AI Training auch auf deinem Client installiert sein."));
+            return 0;
+        }
+        ServerPlayNetworking.send(player, new OpenMenuPayload(page));
+        return 1;
     }
 
     private static int grantKitFlexible(CommandContext<ServerCommandSource> context,
@@ -141,8 +160,8 @@ public final class HeroBotCommands {
 
     private static int listGrantableKits(ServerCommandSource source) {
         source.sendFeedback(() -> Text.literal("Verfügbare Kits: iron, diamond, axe, netherite, mace, crystal, fc_axe, fc_uhc, fc_misch."), false);
-        source.sendFeedback(() -> Text.literal("/hba kit <Kit> — Kit an dich geben; optional /hba kit <Kit> <Spieler> (auch umgekehrt)."), false);
-        source.sendFeedback(() -> Text.literal("Das Kit ersetzt das Inventar des Empfängers. Mit Tab kannst du Kits auswählen."), false);
+        source.sendFeedback(() -> Text.literal("/hba kit gui öffnet die Kit-Auswahl; /hba kit <Kit> gibt es dir."), false);
+        source.sendFeedback(() -> Text.literal("Optional /hba kit <Kit> <Spieler>. Das Kit ersetzt das Inventar des Empfängers."), false);
         return 1;
     }
 
@@ -231,6 +250,7 @@ public final class HeroBotCommands {
         if (source.getPlayer() == null) {
             throw PLAYER_REQUIRED.create();
         }
+        source.sendFeedback(() -> Text.literal("/hba oder /hba menu — Hauptmenü; /hba kit gui — Kit-Auswahl"), false);
         source.sendFeedback(() -> Text.literal("/hba spawn [BotName] [Gegner] — Bot spawnen und PvP-Training starten"), false);
         source.sendFeedback(() -> Text.literal("/hba status — aktiven Kampf und Lernfortschritt anzeigen"), false);
         source.sendFeedback(() -> Text.literal("/hba stop — Training und Bot-Aktionen anhalten"), false);

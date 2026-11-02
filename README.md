@@ -11,6 +11,14 @@ Fabric-Mod für Minecraft 1.21.11. Sie ergänzt HeroBot um einen manuell startba
 
 Die Mod nutzt HeroBots dokumentierte Befehle `/playerspawn` und `/player`. HeroBot-Fake-Spieler respawnen laut Projektbeschreibung automatisch, sofern HeroBots Einstellung `botLeaveOnDeath` nicht aktiviert ist. [HeroBot-Dokumentation](https://modrinth.com/mod/herobot)
 
+## Render Studio
+
+`tools/render-studio/index.html` ist eine lokale Vorschau-App für die HeroBot-Menüs. Öffne die Datei in einem Browser, wähle Startseite, Kit-Auswahl oder Bestätigung, stelle Auflösung und GUI-Skalierung ein und speichere das Ergebnis über **PNG-Render speichern**. **Layouts testen** prüft die Menü-Geometrie für gängige Auflösungen. Die App rendert UI-Entwürfe und startet Minecraft nicht.
+
+Der Layout-Test lässt sich ohne zusätzliche Node-Pakete starten:
+
+    node tools/render-studio/test-layouts.cjs
+
 ## Direktes Duell
 
     /hba

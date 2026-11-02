@@ -56,11 +56,15 @@ public final class HeroBotMenuScreen extends Screen {
         int left = panelLeft();
         int top = panelTop();
         int panelWidth = panelWidth();
+        int bottom = top + panelHeight();
         int cardGap = 12;
         int cardWidth = (panelWidth - 48 - cardGap) / 2;
-        int cardHeight = 54;
+        int rowGap = 8;
+        int startY = top + 68;
+        int footerTop = bottom - (panelHeight() >= 300 ? 77 : 10);
+        int cardHeight = Math.min(68, Math.max(16, (footerTop - startY - rowGap * 2) / 3));
         int startX = left + 24;
-        int startY = top + 82;
+        int rowStep = cardHeight + rowGap;
 
         addCard(startX, startY, cardWidth, cardHeight, "TRAINING STARTEN",
                 "Direktduell · eigenes Inventar kopieren", 0xFF58D6C4,
@@ -68,16 +72,16 @@ public final class HeroBotMenuScreen extends Screen {
         addCard(startX + cardWidth + cardGap, startY, cardWidth, cardHeight, "KITS & LOADOUTS",
                 "Ausrüstung auswählen und bestätigen", 0xFFDB72FF,
                 () -> MinecraftClient.getInstance().setScreen(new HeroBotMenuScreen(KITS_PAGE, this)));
-        addCard(startX, startY + cardHeight + 10, cardWidth, cardHeight, "STATUS",
+        addCard(startX, startY + rowStep, cardWidth, cardHeight, "STATUS",
                 "Training, Kit und Lernfortschritt", 0xFF64DCEB,
                 () -> runCommand("hba status"));
-        addCard(startX + cardWidth + cardGap, startY + cardHeight + 10, cardWidth, cardHeight, "TRAINING STOPPEN",
+        addCard(startX + cardWidth + cardGap, startY + rowStep, cardWidth, cardHeight, "TRAINING STOPPEN",
                 "Kampfsteuerung sicher anhalten", 0xFFE8B16A,
                 () -> runCommand("hba stop"));
-        addCard(startX, startY + (cardHeight + 10) * 2, cardWidth, cardHeight, "BOT ENTFERNEN",
+        addCard(startX, startY + rowStep * 2, cardWidth, cardHeight, "BOT ENTFERNEN",
                 "Aktiven Trainingsbot entfernen", 0xFFFF7777,
                 () -> runCommand("hba remove"));
-        addCard(startX + cardWidth + cardGap, startY + (cardHeight + 10) * 2, cardWidth, cardHeight, "HILFE",
+        addCard(startX + cardWidth + cardGap, startY + rowStep * 2, cardWidth, cardHeight, "HILFE",
                 "Befehle und kurze Anleitung anzeigen", 0xFF8FA9FF,
                 () -> runCommand("hba help"));
     }
@@ -86,16 +90,21 @@ public final class HeroBotMenuScreen extends Screen {
         int left = panelLeft();
         int top = panelTop();
         int panelWidth = panelWidth();
-        boolean compact = this.width < 760;
-        int columns = compact ? 2 : 3;
+        int panelHeight = panelHeight();
+        boolean compact = this.width < 760 || panelHeight < 360;
+        int columns = 3;
         int sidebarWidth = compact ? 0 : 224;
         int gapX = compact ? 8 : 9;
         int gridX = left + 24;
         int gridWidth = panelWidth - 48 - (compact ? 0 : sidebarWidth + 14);
         int cardWidth = (gridWidth - gapX * (columns - 1)) / columns;
-        int cardHeight = compact ? 31 : 43;
         int gapY = compact ? 6 : 8;
         int gridTop = top + (compact ? 69 : 78);
+        int rowCount = (KIT_CARDS.size() + columns - 1) / columns;
+        int footerStatusTop = top + panelHeight - 57;
+        int gridHeight = footerStatusTop - gridTop - 6;
+        int fittedCardHeight = (gridHeight - gapY * (rowCount - 1)) / rowCount;
+        int cardHeight = Math.max(18, Math.min(compact ? 31 : 43, fittedCardHeight));
 
         for (int index = 0; index < KIT_CARDS.size(); index++) {
             KitCardData kit = KIT_CARDS.get(index);
@@ -197,15 +206,17 @@ public final class HeroBotMenuScreen extends Screen {
                         left + 24, bottom - 57, MUTED);
             }
         } else {
-            int infoY = bottom - 77;
-            context.fill(left + 24, infoY, right - 24, bottom - 22, PANEL_LIGHT);
-            context.fill(left + 24, infoY, left + 27, bottom - 22, ACCENT);
-            context.drawTextWithShadow(this.textRenderer,
-                    Text.literal("SHORTCUTS   /hba   ·   /hba kit gui   ·   /hba status"),
-                    left + 38, infoY + 11, 0xFFBFD0E5);
-            context.drawTextWithShadow(this.textRenderer,
-                    Text.literal("Die Oberfläche führt Befehle über den Server aus und prüft Kit-Aktionen vorab."),
-                    left + 38, infoY + 31, MUTED);
+            if (panelHeight() >= 300) {
+                int infoY = bottom - 77;
+                context.fill(left + 24, infoY, right - 24, bottom - 22, PANEL_LIGHT);
+                context.fill(left + 24, infoY, left + 27, bottom - 22, ACCENT);
+                context.drawTextWithShadow(this.textRenderer,
+                        Text.literal("SHORTCUTS   /hba   ·   /hba kit gui   ·   /hba status"),
+                        left + 38, infoY + 11, 0xFFBFD0E5);
+                context.drawTextWithShadow(this.textRenderer,
+                        Text.literal("Die Oberfläche führt Befehle über den Server aus und prüft Kit-Aktionen vorab."),
+                        left + 38, infoY + 31, MUTED);
+            }
         }
         super.render(context, mouseX, mouseY, delta);
     }
@@ -224,11 +235,11 @@ public final class HeroBotMenuScreen extends Screen {
     }
 
     private int panelWidth() {
-        return Math.min(800, Math.max(300, this.width - 28));
+        return Math.min(this.width, Math.min(800, Math.max(300, this.width - 28)));
     }
 
     private int panelHeight() {
-        return Math.min(470, Math.max(260, this.height - 24));
+        return Math.min(this.height, Math.min(470, Math.max(190, this.height - 24)));
     }
 
     private int panelLeft() {
@@ -351,7 +362,7 @@ public final class HeroBotMenuScreen extends Screen {
                 context.drawTextWithShadow(renderer,
                         Text.literal(renderer.trimToWidth(this.subtitle, this.width - 18)),
                         x + 11, y + 27, MUTED);
-            } else if (!this.subtitle.isBlank()) {
+            } else if (!this.subtitle.isBlank() && this.height >= 28) {
                 context.drawTextWithShadow(renderer,
                         Text.literal(renderer.trimToWidth(this.subtitle, this.width - 18)),
                         x + 11, y + 18, MUTED);

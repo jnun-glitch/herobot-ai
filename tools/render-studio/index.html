@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HeroBot Render Studio</title>
+  <style>
+    :root { color-scheme: dark; --bg:#080d15; --panel:#101824; --line:#233246; --muted:#9aaabd; --text:#edf4ff; --mint:#58d6c4; --violet:#db72ff; }
+    * { box-sizing:border-box }
+    body { margin:0; background:radial-gradient(ellipse at 80% 0%,#17303a 0,transparent 40%),var(--bg); color:var(--text); font:14px/1.45 "Segoe UI",sans-serif }
+    header { display:flex; align-items:center; justify-content:space-between; padding:17px 24px; border-bottom:1px solid #243345; background:#0b121d }
+    header strong { letter-spacing:.11em; font-size:16px } header span { color:var(--muted); font-size:12px }
+    .layout { display:grid; grid-template-columns:270px minmax(0,1fr); gap:18px; padding:18px; max-width:1500px; margin:auto }
+    aside,.stage,.results { border:1px solid #223247; background:#0c1420; box-shadow:0 18px 50px #0005 }
+    aside { padding:18px; align-self:start } h1 { font-size:17px; margin:0 0 3px } .hint { color:var(--muted); margin:0 0 18px; font-size:12px }
+    label { display:block; color:#b8c5d7; margin:13px 0 5px; font-size:12px }
+    input,select,button { font:inherit; color:var(--text); background:#151f2d; border:1px solid #30435b; border-radius:4px; padding:9px 10px }
+    input:focus,select:focus,button:focus-visible { outline:2px solid var(--mint); outline-offset:1px }
+    .pair { display:grid; grid-template-columns:1fr 1fr; gap:8px }.wide { width:100% }
+    .pages { display:grid; grid-template-columns:1fr 1fr; gap:7px; margin-top:8px }
+    button { cursor:pointer; transition:background .12s,border-color .12s,transform .12s }
+    button:hover { background:#203047; border-color:#67809d } button:active { transform:translateY(1px) }
+    .pages button.active,.primary { background:#143137; border-color:#58d6c4; color:#a5fff1 }
+    .primary { width:100%; margin-top:16px; font-weight:700 }.secondary { width:100%; margin-top:8px }
+    .stage { min-width:0; padding:14px }
+    .stage-head { display:flex; align-items:center; justify-content:space-between; margin:0 0 11px; gap:12px }
+    .stage-head b { font-size:13px; letter-spacing:.06em }.stage-head span { color:var(--muted); font-size:12px }
+    .canvas-wrap { min-height:350px; display:grid; place-items:center; padding:12px; overflow:auto; background-color:#070a11; background-image:linear-gradient(45deg,#111b28 25%,transparent 25%),linear-gradient(-45deg,#111b28 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#111b28 75%),linear-gradient(-45deg,transparent 75%,#111b28 75%); background-size:22px 22px; background-position:0 0,0 11px,11px -11px,-11px 0 }
+    canvas { display:block; width:min(100%,1100px); height:auto; max-height:72vh; object-fit:contain; box-shadow:0 12px 36px #0009 }
+    .results { grid-column:2; padding:14px 16px }.results-head { display:flex; align-items:center; justify-content:space-between; gap:10px }
+    .results h2 { font-size:14px; margin:0 }.results p { margin:5px 0 0; color:var(--muted); font-size:12px }
+    .result-list { display:grid; grid-template-columns:repeat(auto-fit,minmax(185px,1fr)); gap:7px; margin-top:11px }
+    .result { padding:7px 9px; background:#141e2a; border-left:3px solid #5be0ac; color:#cae4d9; font-size:12px }
+    .result.fail { border-color:#ff7777; color:#ffd1d1 }
+    .foot { grid-column:1/-1; color:#7f91a8; font-size:11px; padding:0 2px }
+    @media (max-width:760px) { .layout { grid-template-columns:1fr; padding:10px }.results,.foot { grid-column:1 } aside { order:0 }.stage { order:1 }.results { order:2 } header { padding:13px 15px } }
+  </style>
+</head>
+<body>
+  <header><strong>HERO BOT <span style="color:#58d6c4">/</span> RENDER STUDIO</strong><span>Lokale Vorschau · PNG-Export · Layout-Prüfung</span></header>
+  <div class="layout">
+    <aside>
+      <h1>Render einstellen</h1><p class="hint">Menüs ansehen und als Bild speichern.</p>
+      <label>Ansicht</label>
+      <div class="pages">
+        <button class="active" data-page="home">Startseite</button><button data-page="kits">Kit-Auswahl</button>
+        <button data-page="confirm">Bestätigung</button><button id="testButton">Layouts testen</button>
+      </div>
+      <label for="kit">Ausgewähltes Kit</label>
+      <select id="kit" class="wide"></select>
+      <label>Bildgröße (Pixel)</label>
+      <div class="pair"><input id="width" type="number" min="320" max="4096" value="2560" aria-label="Renderbreite"><input id="height" type="number" min="240" max="4096" value="1365" aria-label="Renderhöhe"></div>
+      <label for="scale">Minecraft-GUI-Skalierung</label>
+      <select id="scale" class="wide"><option value="1">1× – groß</option><option value="2">2×</option><option value="3" selected>3× – kompakt</option><option value="4">4× – sehr kompakt</option></select>
+      <button id="renderButton" class="primary">PNG-Render speichern</button>
+      <button id="previewButton" class="secondary">Vorschau aktualisieren</button>
+    </aside>
+    <main class="stage">
+      <div class="stage-head"><b id="renderTitle">STARTSEITE</b><span id="dimensions">2560 × 1365 · GUI 3×</span></div>
+      <div class="canvas-wrap"><canvas id="preview" width="2560" height="1365" aria-label="HeroBot-Menü Render"></canvas></div>
+    </main>
+    <section class="results" aria-live="polite">
+      <div class="results-head"><h2 id="resultTitle">Layout-Prüfung bereit</h2><span id="resultSummary">Noch nicht ausgeführt</span></div>
+      <p id="resultDescription">Prüft, ob Karten, Fußzeilen und Dialoge bei gängigen Auflösungen innerhalb des Fensters bleiben.</p>
+      <div id="resultList" class="result-list"></div>
+    </section>
+    <div class="foot">Der PNG-Export wird lokal im Browser erstellt. Die Vorschau ist ein Design-Render; sie startet Minecraft nicht.</div>
+  </div>
+<script>
+(() => {
+  const kits = [
+    {id:'iron',name:'Iron',desc:'Schwert · Schild · Eisenrüstung',color:'#b9c5d3',best:'Schwert-Duelle'},
+    {id:'diamond',name:'Diamond',desc:'Schwert · Axt · Diamantrüstung',color:'#64dceb',best:'Schwert-Duelle'},
+    {id:'axe',name:'Axe',desc:'Axt-Loadout für Schild-Duelle',color:'#e8b16a',best:'Axt- und Schildkampf'},
+    {id:'netherite',name:'Netherite',desc:'Netheritschwert und Rüstung',color:'#b089c8',best:'Schwert-Duelle'},
+    {id:'mace',name:'Mace Flight',desc:'Elytra · Raketen · Mace-Sturz',color:'#ff8c69',best:'Elytra-Mace-Angriffe'},
+    {id:'crystal',name:'Crystal PvP',desc:'Totem · Obsidian · Endkristalle',color:'#db72ff',best:'Crystal PvP und Totem-Spiel'},
+    {id:'fc_axe',name:'FC Axe',desc:'FireClient-Axtvorlage',color:'#e6a66e',best:'Axt- und Schildkampf'},
+    {id:'fc_uhc',name:'FC UHC',desc:'FireClient-UHC-Vorlage',color:'#75d28d',best:'UHC-Nahkampf'},
+    {id:'fc_misch',name:'FC Misch',desc:'Schwert · Axt · Totem',color:'#8fa9ff',best:'Gemischter Schwert-Axt-Kampf'}
+  ];
+  const $ = id => document.getElementById(id);
+  const canvas = $('preview'), ctx = canvas.getContext('2d');
+  const color = {bg:'#070a11',panel:'#0b111d',light:'#121c2a',mint:'#58d6c4',muted:'#9aaabd',white:'#f2f7ff',line:'#233246'};
+  let page = 'home';
+  for (const kit of kits) { const option=document.createElement('option'); option.value=kit.id; option.textContent=kit.name; $('kit').append(option); }
+  $('kit').value='crystal';
+  const clamp=(value,min,max)=>Math.max(min,Math.min(max,value));
+  const geometry=(pageName,width,height,scale)=>{
+    const w=Math.max(1,Math.floor(width/scale)), h=Math.max(1,Math.floor(height/scale));
+    const pw=Math.min(w,Math.min(800,Math.max(300,w-28))), ph=Math.min(h,Math.min(470,Math.max(190,h-24)));
+    const left=Math.floor((w-pw)/2), top=Math.floor((h-ph)/2), bottom=top+ph;
+    if(pageName==='home'){
+      const startY=top+68, footerTop=bottom-(ph>=300?77:10), rowGap=8;
+      const cardH=Math.min(68,Math.max(16,Math.floor((footerTop-startY-rowGap*2)/3)));
+      return {w,h,pw,ph,left,top,bottom,startY,footerTop,cardH,rowGap,homeCards:Array.from({length:6},(_,i)=>({x:left+24+(i%2)*((pw-48-12)/2+12),y:startY+Math.floor(i/2)*(cardH+rowGap),w:(pw-48-12)/2,h:cardH}))};
+    }
+    if(pageName==='kits'){
+      const compact=w<760||ph<360, columns=3, side=compact?0:224;
+      const gapX=compact?8:9, gridX=left+24, gridW=pw-48-(compact?0:side+14), cardW=(gridW-gapX*(columns-1))/columns;
+      const gapY=compact?6:8, gridTop=top+(compact?69:78), rows=Math.ceil(kits.length/columns), footerStatusTop=top+ph-57;
+      const gridH=footerStatusTop-gridTop-6, cardH=Math.max(18,Math.min(compact?31:43,Math.floor((gridH-gapY*(rows-1))/rows)));
+      return {w,h,pw,ph,left,top,bottom,compact,columns,gridX,gridW,cardW,gapX,gapY,gridTop,rows,footerStatusTop,cardH,side};
+    }
+    return {w,h,pw,ph,left,top,bottom,boxW:Math.min(520,w-32),boxH:218};
+  };
+  const fill=(x,y,w,h,c)=>{ctx.fillStyle=c;ctx.fillRect(Math.round(x),Math.round(y),Math.round(w),Math.round(h));};
+  const text=(value,x,y,size=12,c=color.white,bold=false,maxWidth=Infinity)=>{
+    ctx.font=`${bold?'700 ':''}${size}px monospace`; ctx.fillStyle=c; ctx.textBaseline='top';
+    let output=String(value); while(output.length>1&&ctx.measureText(output).width>maxWidth) output=output.slice(0,-2)+'…';
+    ctx.fillText(output,Math.round(x),Math.round(y));
+  };
+  function drawBackdrop(w,h){
+    fill(0,0,w,h,color.bg);
+    for(let x=18;x<w;x+=52)fill(x,0,1,h,'#101d2938');
+    for(let y=16;y<h;y+=52)fill(0,y,w,1,'#101d2938');
+    fill(0,0,Math.min(180,w/3),3,'#173a43'); fill(w-Math.min(180,w/3),h-3,Math.min(180,w/3),3,'#2b1b42');
+  }
+  function drawPanel(g,title,subtitle){
+    fill(g.left,g.top,g.pw,g.ph,'#f20b111d'); fill(g.left,g.top,g.pw,2,color.mint); fill(g.left+1,g.top+56,g.pw-2,1,color.line);
+    text('HERO BOT  /  '+title,g.left+24,g.top+17,16,color.white,true,g.pw-170);
+    text(subtitle,g.left+24,g.top+39,12,color.muted,false,g.pw-170);
+    fill(g.left+g.pw-114,g.top+20,90,19,'#172636'); fill(g.left+g.pw-110,g.top+25,6,6,color.mint); text('READY',g.left+g.pw-96,g.top+24,12,color.mint,true,70);
+  }
+  function drawCard(box,title,subtitle,accent,selected=false){
+    fill(box.x,box.y,box.w,box.h,'#121b29'); fill(box.x,box.y,3,box.h,accent);
+    if(selected){fill(box.x,box.y,box.w,1,accent);fill(box.x,box.y+box.h-1,box.w,1,accent);}
+    const compact=box.h<=32;
+    text(title,box.x+11,box.y+(subtitle?7:Math.max(6,(box.h-11)/2)),compact?10:13,color.white,true,box.w-18);
+    if(subtitle&&box.h>=28)text(subtitle,box.x+11,box.y+(box.h>32?27:18),compact?8:10,color.muted,false,box.w-18);
+  }
+  function drawHome(g){
+    drawPanel(g,'COMBAT CONTROL CENTER','Dein PvP-Training — schnell erreichbar, sauber gesteuert.');
+    const data=[
+      ['TRAINING STARTEN','Direktduell · eigenes Inventar kopieren',color.mint],['KITS & LOADOUTS','Ausrüstung auswählen und bestätigen','#db72ff'],
+      ['STATUS','Training, Kit und Lernfortschritt','#64dceb'],['TRAINING STOPPEN','Kampfsteuerung sicher anhalten','#e8b16a'],
+      ['BOT ENTFERNEN','Aktiven Trainingsbot entfernen','#ff7777'],['HILFE','Befehle und kurze Anleitung anzeigen','#8fa9ff']
+    ];
+    data.forEach((item,i)=>drawCard(g.homeCards[i],item[0],item[1],item[2]));
+    if(g.ph>=300){
+      const infoY=g.bottom-77; fill(g.left+24,infoY,g.pw-48,55,color.light); fill(g.left+24,infoY,3,55,color.mint);
+      text('SHORTCUTS   /hba   ·   /hba kit gui   ·   /hba status',g.left+38,infoY+11,10,'#bfd0e5',false,g.pw-78);
+      text('Die Oberfläche führt Befehle über den Server aus und prüft Kit-Aktionen vorab.',g.left+38,infoY+31,9,color.muted,false,g.pw-78);
+    }
+  }
+  function drawKits(g){
+    drawPanel(g,'LOADOUT SELECTOR','Wähle ein Kit. Vorschau ansehen. Erst nach Bestätigung anwenden.');
+    kits.forEach((kit,i)=>{
+      const x=g.gridX+(i%g.columns)*(g.cardW+g.gapX), y=g.gridTop+Math.floor(i/g.columns)*(g.cardH+g.gapY);
+      drawCard({x,y,w:g.cardW,h:g.cardH},kit.name,g.cardH<=32?kit.id.toUpperCase():kit.desc,kit.color,kit.id===$('kit').value);
+    });
+    if(!g.compact){
+      const x=g.gridX+g.gridW+14, y=g.top+78, sh=g.ph-132;
+      fill(x,y,g.side,sh,color.light); fill(x,y,g.side,2,kits.find(k=>k.id===$('kit').value).color);
+      const kit=kits.find(k=>k.id===$('kit').value); text('SELECTED KIT',x+12,y+13,10,color.muted); text(kit.name.toUpperCase(),x+12,y+31,13,kit.color,true,g.side-24); text(kit.desc,x+12,y+53,9,'#e0eaf6',false,g.side-24);
+      fill(x+12,y+75,g.side-24,1,'#2b3b50'); text('BEST FOR',x+12,y+87,10,color.muted); text(kit.best,x+12,y+105,9,'#bfd0e5',false,g.side-24);
+      text('Empfänger',x+12,y+sh-73,9,color.muted); fill(x+12,y+sh-55,g.side-24,20,'#182537'); text('Spielername (optional)',x+18,y+sh-51,8,'#71849c');
+    }
+    const by=g.top+g.ph-34, gap=8, bw=(g.pw-48-gap*2)/3, x=g.left+24;
+    [['ZURÜCK','#8293a8'],['KIT GEBEN',kits.find(k=>k.id===$('kit').value).color],['BOT STARTEN',color.mint]].forEach((b,i)=>drawCard({x:x+i*(bw+gap),y:by,w:bw,h:23},b[0],'',b[1]));
+    text(kits.find(k=>k.id===$('kit').value).desc,g.left+24,g.bottom-57,9,color.muted,false,g.pw-48);
+  }
+  function drawConfirm(g){
+    drawBackdrop(g.w,g.h); fill(0,0,g.w,g.h,'#000000b8');
+    const x=(g.w-g.boxW)/2,y=(g.h-g.boxH)/2,kit=kits.find(k=>k.id===$('kit').value);
+    fill(x,y,g.boxW,g.boxH,'#101824');fill(x,y,g.boxW,3,kit.color);
+    text('KIT ANWENDEN?',x+24,y+23,16,color.white,true,g.boxW-48); text('Loadout: '+kit.name,x+24,y+56,12,kit.color,true,g.boxW-48);
+    text('Dein Inventar, deine Rüstung und deine Offhand werden ersetzt.',x+24,y+82,10,'#ced8e6',false,g.boxW-48);
+    text('Bitte vorher wichtige Gegenstände aus dem Inventar nehmen.',x+24,y+103,9,'#ffc36a',false,g.boxW-48);
+    const gap=12,bw=(g.boxW-48-gap)/2,by=y+166; drawCard({x:x+24,y:by,w:bw,h:30},'ZURÜCK','', '#8293a8');drawCard({x:x+24+bw+gap,y:by,w:bw,h:30},'BESTÄTIGEN','',kit.color);
+  }
+  function render(){
+    const width=clamp(parseInt($('width').value,10)||854,320,4096),height=clamp(parseInt($('height').value,10)||480,240,4096),scale=parseInt($('scale').value,10)||1;
+    $('width').value=width;$('height').value=height;canvas.width=width;canvas.height=height;
+    const w=width/scale,h=height/scale;ctx.setTransform(scale,0,0,scale,0,0);ctx.imageSmoothingEnabled=false;drawBackdrop(w,h);
+    const g=geometry(page,width,height,scale);if(page==='home')drawHome(g);else if(page==='kits')drawKits(g);else drawConfirm(g);
+    $('dimensions').textContent=`${width} × ${height} · GUI ${scale}×`;$('renderTitle').textContent={home:'STARTSEITE',kits:'KIT-AUSWAHL',confirm:'BESTÄTIGUNG'}[page];
+  }
+  function checkLayout(pageName,width,height,scale){
+    const g=geometry(pageName,width,height,scale); const issues=[];
+    if(g.left<0||g.top<0||g.left+g.pw>g.w+1||g.top+g.ph>g.h+1)issues.push('Panel außerhalb des Fensters');
+    if(pageName==='home'){
+      for(const card of g.homeCards){if(card.x<g.left||card.x+card.w>g.left+g.pw)issues.push('Startkarten außerhalb des Panels');if(card.y+card.h>g.footerTop)issues.push('Startkarten überlappen Fußzeile');}
+      if(g.cardH<16)issues.push('Startkarten zu klein');
+    }else if(pageName==='kits'){
+      for(let i=0;i<kits.length;i++){const y=g.gridTop+Math.floor(i/g.columns)*(g.cardH+g.gapY);if(y+g.cardH>g.footerStatusTop-1)issues.push('Kitkarten überlappen Fußzeile');}
+      if(g.cardW<70)issues.push('Kitkarten zu schmal');if(g.cardH<18)issues.push('Kitkarten zu klein');
+    }else if(g.top<0||g.top+g.boxH>g.h)issues.push('Bestätigungsdialog abgeschnitten');
+    return issues;
+  }
+  function runLayoutTests(){
+    const sizes=[[854,480,1,'854×480 / 1×'],[1280,720,2,'1280×720 / 2×'],[1920,1080,2,'1920×1080 / 2×'],[2560,1365,3,'2560×1365 / 3×'],[1920,900,3,'niedrige Höhe / 3×'],[1280,720,3,'kleine UI / 3×']];
+    const checks=[];for(const [w,h,s,label] of sizes)for(const p of ['home','kits','confirm'])checks.push({label:`${label} · ${p}`,issues:checkLayout(p,w,h,s)});
+    const fails=checks.filter(c=>c.issues.length);$('resultTitle').textContent=fails.length?'Layout-Prüfung: Probleme gefunden':'Layout-Prüfung bestanden';
+    $('resultSummary').textContent=`${checks.length-fails.length}/${checks.length} Ansichten OK`;
+    $('resultDescription').textContent='Geprüft: Fenstergrenzen, Karten-Fußzeilen-Abstände und Dialoghöhe.';
+    $('resultList').replaceChildren(...checks.map(c=>{const div=document.createElement('div');div.className='result'+(c.issues.length?' fail':'');div.textContent=c.issues.length?`FEHLER · ${c.label} · ${c.issues.join(', ')}`:`OK · ${c.label}`;return div;}));
+  }
+  window.HeroBotRenderStudio={geometry,checkLayout,runLayoutTests};
+  document.querySelectorAll('[data-page]').forEach(button=>button.addEventListener('click',()=>{page=button.dataset.page;document.querySelectorAll('[data-page]').forEach(b=>b.classList.toggle('active',b===button));render();}));
+  $('kit').addEventListener('change',render);$('width').addEventListener('change',render);$('height').addEventListener('change',render);$('scale').addEventListener('change',render);$('previewButton').addEventListener('click',render);
+  $('renderButton').addEventListener('click',()=>{render();canvas.toBlob(blob=>{if(!blob)return;const link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download=`herobot-${page}-${$('width').value}x${$('height').value}.png`;link.click();setTimeout(()=>URL.revokeObjectURL(link.href),1000);},'image/png');});
+  $('testButton').addEventListener('click',runLayoutTests);window.addEventListener('resize',render);render();runLayoutTests();
+})();
+</script>
+</body>
+</html>

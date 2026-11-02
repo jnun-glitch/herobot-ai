@@ -319,6 +319,22 @@ final class TrainingController {
         }
         learnFromHuman(session, bot, target, botDamage, false);
 
+        double distance = bot.distanceTo(target);
+        // Enter retreat before healing can return early, so critical-health healing cannot
+        // accidentally skip the retreat state and send the bot straight back into combat.
+        if (bot.getHealth() <= RETREAT_HEALTH_THRESHOLD) {
+            if (!session.retreating) {
+                session.retreating = true;
+                TrainingLog.event("RETREAT_START bot=" + session.botName + " health="
+                        + String.format(Locale.ROOT, "%.1f", bot.getHealth()));
+            }
+        } else if (session.retreating && bot.getHealth() >= RETREAT_END_HEALTH) {
+            session.retreating = false;
+            TrainingLog.event("RETREAT_END bot=" + session.botName + " health="
+                    + String.format(Locale.ROOT, "%.1f", bot.getHealth())
+                    + " distance=" + String.format(Locale.ROOT, "%.2f", distance));
+        }
+
         if (session.healing) {
             if (session.tick >= session.healingUntilTick) {
                 finishHealing(server, session, bot);
@@ -344,21 +360,6 @@ final class TrainingController {
         }
 
         optimizeArmor(session, bot);
-        double distance = bot.distanceTo(target);
-        // Retreat ends only after health has recovered. Reaching a safe distance pauses movement,
-        // so the bot can heal instead of immediately running back into the opponent.
-        if (bot.getHealth() <= RETREAT_HEALTH_THRESHOLD) {
-            if (!session.retreating) {
-                session.retreating = true;
-                TrainingLog.event("RETREAT_START bot=" + session.botName + " health="
-                        + String.format(Locale.ROOT, "%.1f", bot.getHealth()));
-            }
-        } else if (session.retreating && bot.getHealth() >= RETREAT_END_HEALTH) {
-            session.retreating = false;
-            TrainingLog.event("RETREAT_END bot=" + session.botName + " health="
-                    + String.format(Locale.ROOT, "%.1f", bot.getHealth())
-                    + " distance=" + String.format(Locale.ROOT, "%.2f", distance));
-        }
 
         if (!session.healing && !enemyPressure(bot, target)
                 && bot.getHealth() > RETREAT_HEALTH_THRESHOLD

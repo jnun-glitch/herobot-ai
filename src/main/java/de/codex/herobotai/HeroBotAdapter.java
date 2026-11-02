@@ -183,6 +183,17 @@ final class HeroBotAdapter {
         bot.equipStack(EquipmentSlot.OFFHAND, source.getOffHandStack().copy());
     }
 
+    static boolean hasInventoryItems(ServerPlayerEntity player) {
+        for (int slot = 0; slot < 36; slot++) {
+            if (!player.getInventory().getStack(slot).isEmpty()) return true;
+        }
+        return !player.getOffHandStack().isEmpty()
+                || !player.getEquippedStack(EquipmentSlot.HEAD).isEmpty()
+                || !player.getEquippedStack(EquipmentSlot.CHEST).isEmpty()
+                || !player.getEquippedStack(EquipmentSlot.LEGS).isEmpty()
+                || !player.getEquippedStack(EquipmentSlot.FEET).isEmpty();
+    }
+
     static void copyTeam(MinecraftServer server, ServerPlayerEntity owner, String bot) {
         Team team = owner.getScoreboardTeam();
         if (team != null) {

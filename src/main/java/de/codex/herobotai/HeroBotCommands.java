@@ -118,6 +118,10 @@ public final class HeroBotCommands {
         String recipientName = recipient.getName().getString();
         boolean recipientIsBot = HeroBotAdapter.isHeroBot(recipient);
         for (String command : kit.applyCommands(recipientName)) {
+            if (command.equals("clear " + recipientName)
+                    && !HeroBotAdapter.hasInventoryItems(recipient)) {
+                continue;
+            }
             if (!recipientIsBot && command.startsWith("player " + recipientName + " hotbar ")) {
                 continue;
             }

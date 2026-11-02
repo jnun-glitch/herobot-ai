@@ -164,6 +164,10 @@ final class TrainingController {
             TrainingLog.event("INVENTORY_COPY bot=" + botName + " source=" + targetName + " action_pack=false");
         } else {
             for (String command : kit.applyCommands(botName)) {
+                if (command.equals("clear " + botName)
+                        && !HeroBotAdapter.hasInventoryItems(bot)) {
+                    continue;
+                }
                 execute(server, command);
             }
         }
